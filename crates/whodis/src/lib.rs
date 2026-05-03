@@ -13,6 +13,7 @@ mod types;
 pub mod browse;
 pub mod fingerprint;
 pub mod probe;
+pub mod spoof;
 
 pub use auth::Authorization;
 pub use error::{Error, Result};
