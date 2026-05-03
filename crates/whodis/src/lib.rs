@@ -4,6 +4,8 @@
 
 #![doc(html_root_url = "https://docs.rs/whodis")]
 
+mod error;
 mod types;
 
+pub use error::{Error, Result};
 pub use types::{Device, Fingerprint, HostAnswer, Instance, Protocol, ServiceType};
