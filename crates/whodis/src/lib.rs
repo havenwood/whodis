@@ -7,6 +7,7 @@
 mod auth;
 mod error;
 mod mode;
+mod transport;
 mod types;
 
 pub use auth::Authorization;
