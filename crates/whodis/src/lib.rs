@@ -10,6 +10,8 @@ mod mode;
 mod transport;
 mod types;
 
+pub mod fingerprint;
+
 pub use auth::Authorization;
 pub use error::{Error, Result};
 pub use mode::{MDNS_GROUP_V4, MDNS_GROUP_V6, MDNS_PORT, Mode};
