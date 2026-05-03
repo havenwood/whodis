@@ -1,5 +1,36 @@
+[workspace]
+resolver = "2"
+members = ["crates/whodis"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/havenwood/whodis"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal", "io-util"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tokio-stream = "0.1"
+time = { version = "0.3", features = ["formatting", "local-offset", "macros"] }
+socket2 = { version = "0.5", features = ["all"] }
+hickory-proto = { version = "0.24", default-features = false }
+get_if_addrs = "0.5"
+dashmap = "6"
+phf = { version = "0.11", features = ["macros"] }
+governor = "0.7"
+ipnet = "2"
+bytes = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive", "wrap_help"] }
+anyhow = "1"
+
 [workspace.lints.clippy]
-# Clippy lint groups
 cargo = { level = "deny", priority = -1 }
 correctness = { level = "deny", priority = -1 }
 nursery = { level = "deny", priority = -1 }
@@ -8,15 +39,12 @@ perf = { level = "deny", priority = -1 }
 style = { level = "deny", priority = -1 }
 suspicious = { level = "deny", priority = -1 }
 
-# Clippy nursery group allows
 redundant_pub_crate = "allow"
 missing_const_for_fn = "allow"
 
-# Clippy cargo group allows
 cargo_common_metadata = "allow"
 multiple_crate_versions = "allow"
 
-# Clippy pedantic group allows (common patterns in this codebase)
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 must_use_candidate = "allow"
@@ -25,7 +53,6 @@ cast_possible_truncation = "allow"
 cast_sign_loss = "allow"
 cast_precision_loss = "allow"
 
-# Clippy restriction lints (cherry-picked for security & correctness)
 boxed_local = "deny"
 clone_on_copy = "deny"
 cognitive_complexity = "deny"
@@ -41,7 +68,6 @@ indexing_slicing = "deny"
 allow_attributes_without_reason = "deny"
 
 [workspace.lints.rust]
-# Rust lint groups
 future_incompatible = "deny"
 let_underscore = "deny"
 nonstandard_style = "deny"
@@ -51,11 +77,9 @@ rust_2021_compatibility = "deny"
 rust_2024_compatibility = "deny"
 unused = "deny"
 
-# Rust lints (not covered by groups above)
 single_use_lifetimes = "deny"
 trivial_casts = "deny"
 trivial_numeric_casts = "deny"
 unreachable_pub = "deny"
 
-# Safety: deny unsafe code (works with clippy's undocumented_unsafe_blocks above)
 unsafe_code = "deny"
