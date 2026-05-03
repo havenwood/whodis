@@ -11,6 +11,7 @@ mod transport;
 mod types;
 
 pub mod fingerprint;
+pub mod probe;
 
 pub use auth::Authorization;
 pub use error::{Error, Result};
