@@ -10,6 +10,7 @@ mod mode;
 mod transport;
 mod types;
 
+pub mod browse;
 pub mod fingerprint;
 pub mod probe;
 
