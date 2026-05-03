@@ -7,6 +7,8 @@
 mod auth;
 mod error;
 mod mode;
+#[allow(dead_code, reason = "consumed by cli module in Task 12")]
+mod output;
 mod transport;
 mod types;
 
