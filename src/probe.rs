@@ -96,49 +96,43 @@ const META_QUERY: &str = "_services._dns-sd._udp.local.";
 
 /// Run an mDNS DNS-SD meta-query and return one summary per service type seen on the LAN,
 /// each tagged with the number of distinct instances it is currently advertising.
+///
+/// Uses the continuous browser internally because the browser sends single-question
+/// queries on a backoff schedule (1s, 2s, 4s, 8s) and tolerates responders that ignore
+/// multi-question packets. A one-shot multi-question probe is unreliable in practice.
 pub async fn discover_service_types(opts: &ProbeOptions) -> Result<Vec<ServiceTypeSummary>> {
-    let transport = Transport::build(Mode::Listen)?;
+    use tokio_stream::StreamExt;
 
-    // Send the DNS-SD meta-query plus PTR queries for a curated set of common service
-    // types. Many macOS responders ignore the meta-query directly but answer per-type
-    // PTRs and re-multicast their announcements, which we receive via the joined group.
-    let mut q_msg = Message::new(0, MessageType::Query, OpCode::Query);
-    q_msg
-        .set_message_type(MessageType::Query)
-        .set_op_code(OpCode::Query)
-        .set_recursion_desired(false);
-    for name in COMMON_SERVICE_QUERIES {
-        let n = parse_name(name)?;
-        let mut q = Query::query(n, RecordType::PTR);
-        q.set_query_class(DNSClass::IN);
-        q_msg.add_query(q);
-    }
+    let browser = crate::browse::Browser::new(Mode::Listen)?;
+    let cancel = browser.cancel_token();
+    let stream = browser.run();
+    tokio::pin!(stream);
 
-    let records: Vec<Record> =
-        send_and_collect(&transport, &q_msg, opts.timeout, <[Record]>::to_vec).await?;
-
-    // Derive both service types and instance counts in one pass. Any PTR record whose
-    // owner matches the `_<svc>._<proto>.local.` pattern reveals a service type, and
-    // each unique target is an instance.
     let mut counts: HashMap<String, HashSet<String>> = HashMap::new();
-    for r in &records {
-        if r.record_type() != RecordType::PTR {
-            continue;
-        }
-        let owner = r.name().to_string();
-        let owner_norm = owner.trim_end_matches('.');
-        let svc_fqdn_owner = parse_service_type_from_name(&owner).map(|st| st.fqdn());
-        if let Some(RData::PTR(ptr)) = r.data() {
-            let target = ptr.0.to_string();
-            if owner_norm == META_QUERY.trim_end_matches('.') {
-                if let Some(st) = parse_service_type_from_name(&target) {
-                    counts.entry(st.fqdn()).or_default();
-                }
-            } else if let Some(svc_fqdn) = svc_fqdn_owner {
-                counts.entry(svc_fqdn).or_default().insert(target);
+    let deadline = tokio::time::Instant::now() + opts.timeout;
+    while let Some(remaining) = deadline
+        .checked_duration_since(tokio::time::Instant::now())
+        .filter(|d| !d.is_zero())
+    {
+        match tokio::time::timeout(remaining, stream.next()).await {
+            Ok(Some(crate::browse::Event::ServiceTypeFound { service_type })) => {
+                counts.entry(service_type.fqdn()).or_default();
             }
+            Ok(Some(crate::browse::Event::InstanceFound { instance })) => {
+                counts
+                    .entry(instance.service_type.fqdn())
+                    .or_default()
+                    .insert(format!(
+                        "{}.{}",
+                        instance.instance_name,
+                        instance.service_type.fqdn()
+                    ));
+            }
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => break,
         }
     }
+    cancel.cancel();
 
     let mut summaries: Vec<ServiceTypeSummary> = counts
         .into_iter()
@@ -150,36 +144,6 @@ pub async fn discover_service_types(opts: &ProbeOptions) -> Result<Vec<ServiceTy
     summaries.sort_by(|a, b| a.fqdn.cmp(&b.fqdn));
     Ok(summaries)
 }
-
-/// Service-type queries we always probe for. Includes the DNS-SD meta-query and a
-/// curated list of frequently-deployed types so we elicit responses even from
-/// responders that ignore the meta-query. Service types not listed here are still
-/// discovered through ambient announcements that arrive on the joined multicast group.
-const COMMON_SERVICE_QUERIES: &[&str] = &[
-    META_QUERY,
-    "_airplay._tcp.local.",
-    "_raop._tcp.local.",
-    "_ipp._tcp.local.",
-    "_ipps._tcp.local.",
-    "_printer._tcp.local.",
-    "_pdl-datastream._tcp.local.",
-    "_http._tcp.local.",
-    "_https._tcp.local.",
-    "_smb._tcp.local.",
-    "_ssh._tcp.local.",
-    "_sftp-ssh._tcp.local.",
-    "_googlecast._tcp.local.",
-    "_googlezone._tcp.local.",
-    "_hap._tcp.local.",
-    "_homekit._tcp.local.",
-    "_companion-link._tcp.local.",
-    "_apple-mobdev2._tcp.local.",
-    "_remotepairing._tcp.local.",
-    "_amzn-wplay._tcp.local.",
-    "_alexa._tcp.local.",
-    "_spotify-connect._tcp.local.",
-    "_meshcop._udp.local.",
-];
 
 fn decode_service_types(records: &[Record]) -> Vec<ServiceType> {
     let meta_norm = META_QUERY.trim_end_matches('.');
