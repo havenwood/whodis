@@ -264,4 +264,57 @@ mod tests {
         // 16-byte pcap record header + 20 IPv4 + 8 UDP + payload
         assert_eq!(buf.len(), 16 + 20 + 8 + payload.len());
     }
+
+    #[test]
+    fn pcap_roundtrip_via_pcap_file_crate() {
+        use pcap_file::pcap::PcapReader;
+        use std::net::Ipv4Addr;
+
+        let mut buf: Vec<u8> = Vec::new();
+        write_global_header(&mut buf).expect("global header");
+
+        let payload1 = b"hello mdns";
+        write_packet(
+            &mut buf,
+            SocketAddr::new(
+                std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50)),
+                5353,
+            ),
+            payload1,
+        )
+        .expect("packet 1");
+        let payload2 = b"another packet";
+        write_packet(
+            &mut buf,
+            SocketAddr::new(
+                std::net::IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+                5353,
+            ),
+            payload2,
+        )
+        .expect("packet 2");
+
+        let mut reader = PcapReader::new(buf.as_slice()).expect("reader");
+        let header = reader.header();
+        assert_eq!(header.datalink, pcap_file::DataLink::RAW);
+
+        let pkt1 = reader
+            .next_packet()
+            .expect("packet 1 present")
+            .expect("packet 1 ok");
+        assert_eq!(pkt1.data.len(), 20 + 8 + payload1.len());
+        // IPv4 protocol field (byte 9) should be 17 (UDP)
+        assert_eq!(pkt1.data.get(9).copied(), Some(17));
+        // Source IP at bytes 12..16
+        assert_eq!(pkt1.data.get(12..16), Some([192u8, 168, 1, 50].as_slice()));
+
+        let pkt2 = reader
+            .next_packet()
+            .expect("packet 2 present")
+            .expect("packet 2 ok");
+        assert_eq!(pkt2.data.len(), 20 + 8 + payload2.len());
+        assert_eq!(pkt2.data.get(12..16), Some([10u8, 0, 0, 1].as_slice()));
+
+        assert!(reader.next_packet().is_none());
+    }
 }

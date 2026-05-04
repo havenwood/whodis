@@ -608,4 +608,32 @@ mod tests {
         assert_eq!(strip_trailing_dot("foo.local."), "foo.local");
         assert_eq!(strip_trailing_dot("foo.local"), "foo.local");
     }
+
+    #[test]
+    fn decode_host_answers_filters_to_queried_host() {
+        use hickory_proto::rr::rdata::A;
+        use hickory_proto::rr::{DNSClass, Name, RData, Record};
+
+        let our_host = Name::from_utf8("BedroomTV.local.").expect("name");
+        let other_host = Name::from_utf8("Living.local.").expect("name");
+
+        let mut ours =
+            Record::from_rdata(our_host, 60, RData::A(A(std::net::Ipv4Addr::new(10, 0, 0, 5))));
+        ours.set_dns_class(DNSClass::IN);
+        let mut theirs = Record::from_rdata(
+            other_host,
+            60,
+            RData::A(A(std::net::Ipv4Addr::new(10, 0, 0, 99))),
+        );
+        theirs.set_dns_class(DNSClass::IN);
+
+        let answers = decode_host_answers("BedroomTV.local.", &[ours, theirs]);
+        assert_eq!(answers.len(), 1);
+        let answer = answers.first().expect("one answer");
+        assert_eq!(answer.host, "BedroomTV.local.");
+        assert_eq!(
+            answer.addrs,
+            vec![std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 5))]
+        );
+    }
 }

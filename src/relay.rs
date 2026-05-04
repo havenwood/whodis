@@ -123,3 +123,29 @@ async fn bridge(
         ),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn run_with_no_ports_succeeds_silently() {
+        let target: SocketAddr = SocketAddr::from(([127, 0, 0, 1], 1));
+        let cancel = CancellationToken::new();
+        let result = run(&[], target, cancel).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_returns_err_when_listen_bind_fails() {
+        let blocker = TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], 0)))
+            .await
+            .expect("blocker");
+        let blocked_port = blocker.local_addr().expect("addr").port();
+
+        let target = SocketAddr::from(([127, 0, 0, 1], 1));
+        let cancel = CancellationToken::new();
+        let result = run(&[blocked_port], target, cancel).await;
+        assert!(result.is_err(), "expected Err when listen port is already bound");
+    }
+}
