@@ -153,13 +153,14 @@ fn limiter(
 }
 
 fn build_goodbye(fqdn: &str) -> Result<Vec<u8>> {
-    let name = Name::from_utf8(fqdn).map_err(|_| Error::InvalidServiceType(fqdn.to_string()))?;
+    let name = crate::name_util::lax_from_str(fqdn)?;
+    let service_type = service_type_for_instance(&name, fqdn)?;
     let mut msg = Message::new(0, MessageType::Query, OpCode::Query);
     msg.set_message_type(MessageType::Response)
         .set_authoritative(true)
         .set_response_code(ResponseCode::NoError);
 
-    let mut ptr = Record::from_rdata(name.clone(), 0, RData::PTR(PTR(name.clone())));
+    let mut ptr = Record::from_rdata(service_type, 0, RData::PTR(PTR(name.clone())));
     ptr.set_dns_class(DNSClass::IN);
     msg.add_answer(ptr);
 
@@ -176,7 +177,7 @@ fn build_goodbye(fqdn: &str) -> Result<Vec<u8>> {
 }
 
 fn build_conflict(fqdn: &str) -> Result<Vec<u8>> {
-    let name = Name::from_utf8(fqdn).map_err(|_| Error::InvalidServiceType(fqdn.to_string()))?;
+    let name = crate::name_util::lax_from_str(fqdn)?;
     let mut msg = Message::new(0, MessageType::Query, OpCode::Query);
     msg.set_message_type(MessageType::Response)
         .set_authoritative(true)
@@ -189,6 +190,32 @@ fn build_conflict(fqdn: &str) -> Result<Vec<u8>> {
     msg.add_answer(srv);
 
     Ok(msg.to_bytes()?)
+}
+
+fn service_type_for_instance(instance: &Name, original: &str) -> Result<Name> {
+    let labels: Vec<&[u8]> = instance.iter().collect();
+    let n = labels.len();
+    if n < 4 {
+        return Err(Error::InvalidServiceType(original.to_string()));
+    }
+    let svc = labels.get(n - 3).copied().unwrap_or_default();
+    let proto = labels.get(n - 2).copied().unwrap_or_default();
+    let tld = labels.get(n - 1).copied().unwrap_or_default();
+    let proto =
+        std::str::from_utf8(proto).map_err(|_| Error::InvalidServiceType(original.to_string()))?;
+    let tld =
+        std::str::from_utf8(tld).map_err(|_| Error::InvalidServiceType(original.to_string()))?;
+    if !svc.starts_with(b"_")
+        || !(proto.eq_ignore_ascii_case("_tcp") || proto.eq_ignore_ascii_case("_udp"))
+        || !tld.eq_ignore_ascii_case("local")
+    {
+        return Err(Error::InvalidServiceType(original.to_string()));
+    }
+    let service_labels = labels
+        .get(n - 3..)
+        .ok_or_else(|| Error::InvalidServiceType(original.to_string()))?;
+    Name::from_labels(service_labels.iter().copied())
+        .map_err(|_| Error::InvalidServiceType(original.to_string()))
 }
 
 fn strip_dot(s: &str) -> String {
@@ -210,6 +237,37 @@ mod tests {
         for r in msg.answers() {
             assert_eq!(r.ttl(), 0);
         }
+    }
+
+    #[test]
+    fn build_goodbye_ptr_owns_service_type_and_points_to_instance() {
+        let bytes = build_goodbye("Foo._airplay._tcp.local.").expect("build");
+        let msg = hickory_proto::op::Message::from_bytes(&bytes).expect("parse");
+        let ptr = msg.answers().first().expect("ptr answer");
+
+        assert_eq!(ptr.name().to_string(), "_airplay._tcp.local.");
+        assert!(matches!(
+            ptr.data(),
+            Some(hickory_proto::rr::RData::PTR(target))
+                if target.0.to_string() == "Foo._airplay._tcp.local."
+        ));
+    }
+
+    #[test]
+    fn build_goodbye_accepts_non_std3_instance_labels() {
+        let bytes = build_goodbye("Living Room._airplay._tcp.local.").expect("build");
+        let msg = hickory_proto::op::Message::from_bytes(&bytes).expect("parse");
+
+        assert_eq!(
+            msg.answers().first().expect("ptr").name().to_string(),
+            "_airplay._tcp.local."
+        );
+    }
+
+    #[test]
+    fn build_goodbye_rejects_non_instance_name() {
+        assert!(build_goodbye("_airplay._tcp.local.").is_err());
+        assert!(build_goodbye("Foo._airplay._http.local.").is_err());
     }
 
     #[test]

@@ -234,6 +234,31 @@ fn decode_service_types(records: &[Record]) -> Vec<ServiceType> {
         .collect()
 }
 
+/// Extract `_<svc>._<tcp|udp>` from the trailing labels of an SRV/TXT owner Name.
+/// Reads label bytes directly, so an instance name containing `.` or `\` does
+/// not confuse the boundary detection.
+fn parse_service_type_from_owner(name: &Name) -> Option<ServiceType> {
+    let labels: Vec<&[u8]> = name.iter().collect();
+    let n = labels.len();
+    if n < 4 {
+        return None;
+    }
+    let last = std::str::from_utf8(labels.get(n - 1)?).ok()?;
+    if !last.eq_ignore_ascii_case("local") {
+        return None;
+    }
+    let proto = match std::str::from_utf8(labels.get(n - 2)?).ok()? {
+        "_tcp" => Protocol::Tcp,
+        "_udp" => Protocol::Udp,
+        _ => return None,
+    };
+    let svc = std::str::from_utf8(labels.get(n - 3)?).ok()?.to_string();
+    if !svc.starts_with('_') {
+        return None;
+    }
+    Some(ServiceType::new(svc, proto))
+}
+
 fn parse_service_type_from_name(s: &str) -> Option<ServiceType> {
     let trimmed = s.trim_end_matches('.').trim_end_matches(".local");
     let parts: Vec<&str> = trimmed.split('.').collect();
@@ -587,9 +612,8 @@ pub async fn enum_host(host: &str, opts: &ProbeOptions) -> Result<HostEnumeratio
     let host_norm = strip_trailing_dot(host).to_ascii_lowercase();
 
     let mut addrs: Vec<IpAddr> = Vec::with_capacity(2);
-    // owner -> (port, ServiceType)
-    let mut srv_owners: BTreeMap<String, (u16, ServiceType)> = BTreeMap::new();
-    let mut txt_by_owner: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    let mut srv_owners: BTreeMap<Name, (u16, ServiceType)> = BTreeMap::new();
+    let mut txt_by_owner: BTreeMap<Name, BTreeMap<String, String>> = BTreeMap::new();
 
     for r in &records {
         match r.data() {
@@ -602,21 +626,22 @@ pub async fn enum_host(host: &str, opts: &ProbeOptions) -> Result<HostEnumeratio
             Some(RData::SRV(srv)) => {
                 let target = srv.target().to_string();
                 if matches_host(&target, &host_norm) {
-                    let owner = r.name().to_string();
-                    let svc = parse_service_type_from_name(&owner)
+                    let svc = parse_service_type_from_owner(r.name())
                         .unwrap_or_else(|| ServiceType::new("_unknown", Protocol::Tcp));
-                    srv_owners.insert(owner, (srv.port(), svc));
+                    srv_owners.insert(r.name().clone(), (srv.port(), svc));
                 }
             }
             Some(RData::TXT(txt)) => {
-                let owner = r.name().to_string();
                 let mut map: BTreeMap<String, String> = BTreeMap::new();
                 for kv in txt.iter() {
                     if let Some((k, v)) = split_kv_string(kv) {
                         map.insert(k, v);
                     }
                 }
-                txt_by_owner.entry(owner).or_default().extend(map);
+                txt_by_owner
+                    .entry(r.name().clone())
+                    .or_default()
+                    .extend(map);
             }
             _ => {}
         }
@@ -624,9 +649,9 @@ pub async fn enum_host(host: &str, opts: &ProbeOptions) -> Result<HostEnumeratio
 
     let mut services: Vec<HostServiceMatch> = srv_owners
         .into_iter()
-        .map(|(owner, (port, svc))| {
-            let instance_name = leftmost_label_string(&owner);
-            let txt = txt_by_owner.get(&owner).cloned().unwrap_or_default();
+        .map(|(owner_name, (port, svc))| {
+            let instance_name = leftmost_label(&owner_name);
+            let txt = txt_by_owner.get(&owner_name).cloned().unwrap_or_default();
             HostServiceMatch {
                 service_type: svc.fqdn(),
                 instance_name,
@@ -673,10 +698,6 @@ fn split_kv_string(raw: &[u8]) -> Option<(String, String)> {
         String::from,
     );
     Some((key, value))
-}
-
-fn leftmost_label_string(name: &str) -> String {
-    name.split('.').next().unwrap_or(name).to_string()
 }
 
 #[cfg(test)]
@@ -744,11 +765,37 @@ mod tests {
     }
 
     #[test]
-    fn leftmost_label_string_returns_first_label() {
-        assert_eq!(
-            leftmost_label_string("Brother HL-L2350DW._ipp._tcp.local."),
-            "Brother HL-L2350DW"
-        );
+    fn parse_service_type_from_owner_extracts_last_two_labels() {
+        let name = crate::name_util::lax_from_str("Foo._airplay._tcp.local.").expect("name");
+        let svc = parse_service_type_from_owner(&name).expect("service");
+        assert_eq!(svc.name, "_airplay");
+        assert_eq!(svc.protocol, Protocol::Tcp);
+    }
+
+    #[test]
+    fn parse_service_type_from_owner_handles_dot_in_instance_label() {
+        let labels: Vec<&[u8]> = vec![
+            b"v1.0 Speaker".as_slice(),
+            b"_airplay".as_slice(),
+            b"_tcp".as_slice(),
+            b"local".as_slice(),
+        ];
+        let name = Name::from_labels(labels).expect("name");
+        let svc = parse_service_type_from_owner(&name).expect("service");
+        assert_eq!(svc.name, "_airplay");
+    }
+
+    #[test]
+    fn instance_fqdn_escapes_dot_in_instance_name() {
+        let inst = crate::types::Instance {
+            service_type: crate::types::ServiceType::new("_airplay", Protocol::Tcp),
+            instance_name: "v1.0 Speaker".into(),
+            host: "host.local.".into(),
+            port: 7000,
+            addrs: Vec::new(),
+            txt: BTreeMap::new(),
+        };
+        assert_eq!(inst.fqdn(), "v1\\.0 Speaker._airplay._tcp.local.");
     }
 
     #[test]

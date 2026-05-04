@@ -40,7 +40,11 @@ impl ServiceType {
 
     #[must_use]
     pub fn fqdn(&self) -> String {
-        format!("{}.{}.local.", self.name, self.protocol.as_str())
+        format!(
+            "{}.{}.local.",
+            crate::name_util::escape_label(&self.name),
+            self.protocol.as_str()
+        )
     }
 }
 
@@ -61,8 +65,8 @@ impl Instance {
     pub fn fqdn(&self) -> String {
         format!(
             "{}.{}.{}.local.",
-            self.instance_name,
-            self.service_type.name,
+            crate::name_util::escape_label(&self.instance_name),
+            crate::name_util::escape_label(&self.service_type.name),
             self.service_type.protocol.as_str()
         )
     }

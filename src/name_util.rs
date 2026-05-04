@@ -9,6 +9,23 @@ use hickory_proto::rr::Name;
 
 use crate::error::{Error, Result};
 
+/// Escape a single DNS label for inclusion in a dot-joined fqdn string.
+///
+/// Backslashes the literal `.` and `\` characters per RFC 1035 §5.1 so a label
+/// containing a dot (e.g. `v1.0 Speaker`) does not collide with the label
+/// separator when concatenated. Other characters (including non-ASCII UTF-8)
+/// pass through unchanged for human-readable output.
+pub(crate) fn escape_label(label: &str) -> String {
+    let mut out = String::with_capacity(label.len());
+    for c in label.chars() {
+        if c == '\\' || c == '.' {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// Parse a dot-separated fqdn into a `Name` without STD3 character validation.
 pub(crate) fn lax_from_str(s: &str) -> Result<Name> {
     if s.contains('\0') {
@@ -53,5 +70,15 @@ mod tests {
     fn rejects_empty_string() {
         assert!(lax_from_str("").is_err());
         assert!(lax_from_str(".").is_err());
+    }
+
+    #[test]
+    fn escape_label_backslashes_dots_and_backslashes() {
+        assert_eq!(escape_label("v1.0 Speaker"), "v1\\.0 Speaker");
+        assert_eq!(escape_label("a\\b"), "a\\\\b");
+        assert_eq!(
+            escape_label("Shannon's MacBook Pro"),
+            "Shannon's MacBook Pro"
+        );
     }
 }
