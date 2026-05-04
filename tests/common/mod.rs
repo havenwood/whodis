@@ -63,8 +63,7 @@ pub(crate) fn spawn_test_responder(table: AnswerTable) -> Responder {
 }
 
 /// Build and send a single mDNS response containing PTR + SRV + TXT + A records
-/// for `FakeATV._pentest-test._tcp.local.` to the test multicast group.
-/// The browser must be running and joined to the group before calling this.
+/// for `FakeATV._pentest-test._tcp.local.` to the browser's test UDP port.
 pub(crate) fn send_fake_appletv_announcement() {
     let instance = Name::from_utf8("FakeATV._pentest-test._tcp.local.").expect("instance name");
     let svc_type = Name::from_utf8("_pentest-test._tcp.local.").expect("svc type name");
@@ -103,13 +102,12 @@ pub(crate) fn send_fake_appletv_announcement() {
 
     let bytes = msg.to_bytes().expect("encode");
 
-    let sock = UdpSocket::bind("0.0.0.0:0").expect("bind sender");
-    sock.set_multicast_loop_v4(true).expect("multicast loop");
-    let dst = SocketAddr::new(IpAddr::V4(TEST_GROUP_V4), TEST_PORT);
+    let sock = build_test_sender();
+    let dst = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), TEST_PORT);
     sock.send_to(&bytes, dst).expect("send");
 }
 
-/// Send a TTL=0 goodbye for `FakeATV._pentest-test._tcp.local.` to the test group.
+/// Send a TTL=0 goodbye for `FakeATV._pentest-test._tcp.local.` to the test UDP port.
 pub(crate) fn send_fake_appletv_goodbye() {
     let instance = Name::from_utf8("FakeATV._pentest-test._tcp.local.").expect("instance name");
     let svc_type = Name::from_utf8("_pentest-test._tcp.local.").expect("svc type name");
@@ -126,12 +124,15 @@ pub(crate) fn send_fake_appletv_goodbye() {
 
     let bytes = msg.to_bytes().expect("encode");
 
-    let sock = UdpSocket::bind("0.0.0.0:0").expect("bind sender");
-    sock.set_multicast_loop_v4(true).expect("multicast loop");
-    let dst = SocketAddr::new(IpAddr::V4(TEST_GROUP_V4), TEST_PORT);
+    let sock = build_test_sender();
+    let dst = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), TEST_PORT);
     sock.send_to(&bytes, dst).expect("send");
 }
 
 pub(crate) fn settle() -> Duration {
     Duration::from_millis(500)
+}
+
+fn build_test_sender() -> UdpSocket {
+    UdpSocket::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).expect("bind sender")
 }
