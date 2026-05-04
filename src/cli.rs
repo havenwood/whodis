@@ -314,7 +314,7 @@ async fn run_spoof(
 async fn run_flood(kind: FloodCmd) -> anyhow::Result<()> {
     use std::num::NonZeroU32;
 
-    match kind {
+    let sent = match kind {
         FloodCmd::Goodbye {
             targets,
             allow_instance,
@@ -324,7 +324,7 @@ async fn run_flood(kind: FloodCmd) -> anyhow::Result<()> {
             let opts = FloodOptions {
                 rate_pps: NonZeroU32::new(rate).unwrap_or(NonZeroU32::MIN),
             };
-            flood::goodbye(Mode::Authoritative, &targets, &auth, opts).await?;
+            flood::goodbye(Mode::Authoritative, &targets, &auth, opts).await?
         }
         FloodCmd::Conflict {
             targets,
@@ -335,9 +335,13 @@ async fn run_flood(kind: FloodCmd) -> anyhow::Result<()> {
             let opts = FloodOptions {
                 rate_pps: NonZeroU32::new(rate).unwrap_or(NonZeroU32::MIN),
             };
-            flood::conflict_rename(Mode::Authoritative, &targets, &auth, opts).await?;
+            flood::conflict_rename(Mode::Authoritative, &targets, &auth, opts).await?
         }
+    };
+    if sent == 0 {
+        anyhow::bail!("no packets sent (allow-list filtered every target)");
     }
+    tracing::info!(sent, "flood complete");
     Ok(())
 }
 

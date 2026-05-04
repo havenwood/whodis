@@ -34,7 +34,7 @@ pub async fn goodbye(
     targets: &[String],
     auth: &Authorization,
     opts: FloodOptions,
-) -> Result<()> {
+) -> Result<usize> {
     auth.warn_once_if_permissive("flood:goodbye");
     if !mode.sends_responses() {
         return Err(Error::InvalidServiceType(format!(
@@ -44,16 +44,18 @@ pub async fn goodbye(
     let transport = Arc::new(Transport::build(mode)?);
     let limiter = limiter(opts.rate_pps);
 
+    let mut sent = 0_usize;
     for fqdn in targets {
         if !auth.permits_instance(&strip_dot(fqdn)) {
-            tracing::debug!(target = %fqdn, "blocked by allow-list");
+            tracing::warn!(target = %fqdn, "blocked by allow-list");
             continue;
         }
         let bytes = build_goodbye(fqdn)?;
         limiter.until_ready().await;
         transport.send_query(&bytes, Destination::Multicast).await?;
+        sent += 1;
     }
-    Ok(())
+    Ok(sent)
 }
 
 pub async fn conflict_rename(
@@ -61,7 +63,7 @@ pub async fn conflict_rename(
     targets: &[String],
     auth: &Authorization,
     opts: FloodOptions,
-) -> Result<()> {
+) -> Result<usize> {
     auth.warn_once_if_permissive("flood:conflict");
     if !mode.sends_responses() {
         return Err(Error::InvalidServiceType(format!(
@@ -71,16 +73,18 @@ pub async fn conflict_rename(
     let transport = Arc::new(Transport::build(mode)?);
     let limiter = limiter(opts.rate_pps);
 
+    let mut sent = 0_usize;
     for fqdn in targets {
         if !auth.permits_instance(&strip_dot(fqdn)) {
-            tracing::debug!(target = %fqdn, "blocked by allow-list");
+            tracing::warn!(target = %fqdn, "blocked by allow-list");
             continue;
         }
         let bytes = build_conflict(fqdn)?;
         limiter.until_ready().await;
         transport.send_query(&bytes, Destination::Multicast).await?;
+        sent += 1;
     }
-    Ok(())
+    Ok(sent)
 }
 
 fn limiter(
