@@ -1,5 +1,6 @@
 //! CLI argument parsing and subcommand dispatch.
 
+use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -14,6 +15,7 @@ use crate::flood::{self, FloodOptions};
 use crate::mode::Mode;
 use crate::output::{ColorMode, Renderer, emit_browse_event, emit_instance};
 use crate::probe::{self, ProbeOptions};
+use crate::spoof_template::{self, Template};
 use crate::types::{Protocol, ServiceType};
 
 #[derive(Parser, Debug)]
@@ -94,9 +96,21 @@ pub enum Cmd {
 
     /// Run an authoritative responder against the given TOML answer table.
     Spoof {
-        /// Path to a TOML answer table.
-        #[arg(value_name = "TABLE")]
-        table: std::path::PathBuf,
+        /// Path to a TOML answer table. Optional when --template is given.
+        #[arg(value_name = "TABLE", required_unless_present = "template")]
+        table: Option<std::path::PathBuf>,
+
+        /// Built-in service template. Requires --name and --ip.
+        #[arg(long, value_enum, requires = "name", requires_all = ["name", "ip"])]
+        template: Option<Template>,
+
+        /// Instance name for the template (e.g. "Conf Room").
+        #[arg(long, requires = "template")]
+        name: Option<String>,
+
+        /// IPv4 address for the template A record.
+        #[arg(long, requires = "template")]
+        ip: Option<Ipv4Addr>,
 
         #[arg(long, default_value_t = 3)]
         burst: u8,
@@ -190,11 +204,14 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         }
         Cmd::Spoof {
             table,
+            template,
+            name,
+            ip,
             burst,
             allow,
             allow_instance,
         } => {
-            run_spoof(renderer, table, burst, allow, allow_instance).await?;
+            run_spoof(renderer, table, template, name, ip, burst, allow, allow_instance).await?;
         }
         Cmd::Flood { kind } => run_flood(kind).await?,
     }
@@ -329,22 +346,39 @@ async fn run_probe(
     clippy::similar_names,
     reason = "names match CLI flag spelling: allow vs allow_instance"
 )]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "all args map 1:1 to CLI flags; splitting into a struct would obscure the relationship"
+)]
 async fn run_spoof(
     _renderer: Renderer,
-    table_path: std::path::PathBuf,
+    table_path: Option<std::path::PathBuf>,
+    template: Option<Template>,
+    name: Option<String>,
+    ip: Option<Ipv4Addr>,
     burst: u8,
     allow: Vec<IpNet>,
     allow_instance: Vec<String>,
 ) -> anyhow::Result<()> {
-    let raw = std::fs::read_to_string(&table_path)
-        .with_context(|| format!("reading {}", table_path.display()))?;
-    let table = crate::spoof_table::load(&raw)?;
+    let table = if let Some(tmpl) = template {
+        if table_path.is_some() {
+            tracing::warn!("--template and TABLE both given; --template takes precedence");
+        }
+        let tmpl_name = name.as_deref().context("--name required with --template")?;
+        let tmpl_ip = ip.context("--ip required with --template")?;
+        spoof_template::build(tmpl, tmpl_name, tmpl_ip)?
+    } else {
+        let path = table_path.context("TABLE required when --template is not given")?;
+        let raw = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading {}", path.display()))?;
+        crate::spoof_table::load(&raw)?
+    };
     let mut auth = Authorization::new();
-    for n in allow {
-        auth = auth.allow_subnet(n);
+    for cidr in allow {
+        auth = auth.allow_subnet(cidr);
     }
-    for name in allow_instance {
-        auth = auth.allow_instance(name);
+    for inst_name in allow_instance {
+        auth = auth.allow_instance(inst_name);
     }
     let resp = crate::spoof::Responder::new(Mode::Authoritative, auth, table, burst)?;
     let cancel = resp.cancel_token();

@@ -58,6 +58,16 @@ whodis spoof answers.toml --burst 3 --allow 192.168.1.0/24
 whodis spoof answers.toml --allow-instance "Living Room ATV"
 ```
 
+Built-in templates let you skip writing a TOML file for common service types. Pass `--template`, `--name`, and `--ip`:
+
+```
+whodis spoof --template airplay --name "Conf Room" --ip 10.0.5.42
+whodis spoof --template ipp --name "Lobby Printer" --ip 10.0.5.50
+whodis spoof --template ssh --name "honeypot" --ip 10.0.5.99
+```
+
+Available templates: `airplay`, `raop`, `ipp`, `smb`, `ssh`, `googlecast`.
+
 `answers.toml` for a fake AirPlay receiver:
 
 ```toml

@@ -13,6 +13,8 @@ mod spoof_table;
 mod transport;
 mod types;
 
+pub mod spoof_template;
+
 pub mod browse;
 pub mod fingerprint;
 pub mod flood;

@@ -53,6 +53,24 @@ impl AnswerTableBuilder {
         let name_str = name.into();
         let rec_name =
             Name::from_utf8(&name_str).map_err(|_| Error::InvalidServiceType(name_str.clone()))?;
+        self.push_entry(name_str, rec_name, qtype, rdata);
+        Ok(self)
+    }
+
+    /// Like [`answer`] but accepts a pre-built [`Name`] for labels that contain characters
+    /// rejected by the STD3 validator (e.g. `@` in RAOP instance names).
+    pub fn answer_name(
+        mut self,
+        rec_name: Name,
+        qtype: RecordType,
+        rdata: RData,
+    ) -> Result<Self> {
+        let name_str = rec_name.to_string();
+        self.push_entry(name_str, rec_name, qtype, rdata);
+        Ok(self)
+    }
+
+    fn push_entry(&mut self, name_str: String, rec_name: Name, qtype: RecordType, rdata: RData) {
         let mut rec = Record::from_rdata(rec_name, self.ttl, rdata);
         rec.set_dns_class(DNSClass::IN);
         if let Some(existing) = self
@@ -68,7 +86,6 @@ impl AnswerTableBuilder {
                 records: vec![rec],
             });
         }
-        Ok(self)
     }
 
     #[must_use]
