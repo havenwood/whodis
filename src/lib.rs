@@ -11,6 +11,7 @@ mod error;
 mod mode;
 mod output;
 mod relay;
+mod report;
 mod scope;
 mod spoof_table;
 mod transport;

@@ -17,13 +17,15 @@ cargo install --path .
 
 ## Subcommands
 
-| Command | What |
+| Command  | What |
 |---|---|
-| `browse` | Watch the LAN for mDNS announcements |
-| `probe`  | One-shot directed mDNS query |
-| `enum`   | Per-host service deep dive |
-| `spoof`  | Authoritative responder reading a TOML answer table |
-| `flood`  | Goodbye / conflict-rename floods |
+| `browse`  | Watch the LAN for mDNS announcements |
+| `probe`   | One-shot directed mDNS query |
+| `enum`    | Per-host service deep dive |
+| `spoof`   | Authoritative responder reading a TOML answer table |
+| `flood`   | Goodbye / conflict-rename floods |
+| `capture` | Write mDNS traffic to a pcap file |
+| `report`  | Markdown engagement report (service types + instance inventory) |
 
 ## Browse
 
@@ -139,6 +141,23 @@ whodis capture --pcap engagement.pcap -t 60     # 60s window
 whodis capture --pcap engagement.pcap           # until Ctrl-C
 tshark -r engagement.pcap                        # inspect
 ```
+
+## Report
+
+Run an inventory pass and write a Markdown engagement report.
+
+```sh
+whodis report --out engagement.md           # 10s window, default path
+whodis report -t 30 --out lan-snapshot.md   # longer inventory
+WHODIS_SCOPE=engagement.toml whodis report  # writes into scope's log_dir if set
+```
+
+The report contains:
+- a service-type summary table from the DNS-SD meta-query
+- an instance inventory with vendor/product fingerprints and TXT highlights
+- timestamps and tool version metadata
+
+Pair with `whodis capture --pcap engagement.pcap` for full packet evidence alongside the narrative report.
 
 ## Demo: spoof, browse, flood together
 

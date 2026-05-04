@@ -27,7 +27,6 @@ pub(crate) struct Scope {
     #[serde(default)]
     pub(crate) allow_instance: Vec<String>,
     #[serde(default)]
-    #[allow(dead_code, reason = "log_dir is a placeholder for the planned `report` subcommand (F8)")]
     pub(crate) log_dir: Option<PathBuf>,
 }
 
@@ -66,7 +65,6 @@ impl Scope {
     }
 
     #[must_use]
-    #[allow(dead_code, reason = "log_dir accessor is a placeholder for the planned `report` subcommand (F8)")]
     pub(crate) fn log_dir(&self) -> Option<&Path> {
         self.log_dir.as_deref()
     }

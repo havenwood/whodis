@@ -156,6 +156,17 @@ pub enum Cmd {
         #[arg(short = 't', long, default_value_t = 0)]
         timeout: u64,
     },
+
+    /// Generate a Markdown engagement report.
+    Report {
+        /// Output Markdown file path. If --scope sets `log_dir`, path is relative to it.
+        #[arg(long, value_name = "FILE", default_value = "engagement.md")]
+        out: std::path::PathBuf,
+
+        /// Inventory window in seconds (default 10).
+        #[arg(short = 't', long, default_value_t = 10)]
+        timeout: u64,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -259,6 +270,27 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         Cmd::Capture { pcap, timeout } => {
             let count = crate::capture::run(&pcap, timeout).await?;
             tracing::info!(packets = count, file = %pcap.display(), "capture complete");
+        }
+        Cmd::Report { out, timeout } => {
+            // If scope.log_dir is set and `out` is relative, resolve it inside log_dir.
+            let out = if out.is_relative() {
+                scope.as_ref().map_or_else(
+                    || out.clone(),
+                    |scope_ref| {
+                        scope_ref.log_dir().map_or_else(
+                            || out.clone(),
+                            |dir| {
+                                std::fs::create_dir_all(dir).ok();
+                                dir.join(&out)
+                            },
+                        )
+                    },
+                )
+            } else {
+                out.clone()
+            };
+            let count = crate::report::write(&out, timeout).await?;
+            tracing::info!(instances = count, file = %out.display(), "report written");
         }
     }
     Ok(())
