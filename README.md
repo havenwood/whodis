@@ -98,6 +98,39 @@ whodis flood conflict Foo._airplay._tcp.local. --allow-instance Foo
 
 `--rate` caps packets per second (default 50).
 
+## Demo: spoof, browse, flood together
+
+Three terminals using the `answers.toml` from the Spoof section.
+
+**Terminal 1** — start the spoof:
+
+```sh
+whodis spoof answers.toml --burst 3 --allow 192.168.50.0/24
+```
+
+**Terminal 2** — watch the LAN. Your fake AppleTV shows up next to anything real:
+
+```
+$ whodis browse --pretty --fingerprint
+   +  19:11:52  spoofed-appletv  _airplay._tcp...  spoofed-appletv.local.:7000  Apple AppleTV (tvOS)
+```
+
+**Terminal 3** — flood the spoof. The spoof defends its own name immediately, so Terminal 2 sees the goodbye and the re-announce:
+
+```sh
+whodis flood goodbye Spoofed-AppleTV._airplay._tcp.local.
+```
+
+Back on Terminal 2:
+
+```
+   +  19:11:52  spoofed-appletv  _airplay._tcp...  spoofed-appletv.local.:7000  Apple AppleTV (tvOS)
+   -  19:11:53  spoofed-appletv._airplay....                                    goodbye
+   +  19:11:54  spoofed-appletv  _airplay._tcp...  spoofed-appletv.local.:7000  Apple AppleTV (tvOS)
+```
+
+Same recipe works against real LAN devices. Pick a target name from `whodis browse` and substitute it for the fqdn above.
+
 ## Modes
 
 | Mode | When | Binds 5353 |
