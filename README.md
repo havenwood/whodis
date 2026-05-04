@@ -24,7 +24,7 @@ cargo install --path .
 |---|---|
 | `browse`  | Stream every mDNS event from the LAN |
 | `probe`   | Directed query or service-type list with no args |
-| `enum`    | Per-host service deep dive |
+| `enum`    | Per-host service deep dive, or host list with no args |
 | `capture` | Dump mDNS to a pcap file |
 | `spoof`   | Authoritative responder, optionally with a TCP relay |
 | `clone`   | Capture a real instance to a TOML answer table |
@@ -57,9 +57,11 @@ whodis probe --host BedroomTV.local                   # resolve a hostname
 
 ## Enum
 
-Pick one host, list every service it advertises.
+Pick one host, list every service it advertises. With no host, lists hosts on the LAN
+with the count of distinct service types each one advertises.
 
 ```
+whodis enum                                  # hosts + service-type counts
 whodis enum BedroomTV.local.
 whodis enum 192-168-50-179.local. -t 8
 ```

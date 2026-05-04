@@ -147,10 +147,10 @@ pub enum Cmd {
         reannounce_interval: u64,
     },
 
-    /// Enumerate every service a single host advertises.
+    /// Enumerate every service a single host advertises. Without args, lists hosts on the LAN.
     Enum {
-        /// Hostname to enumerate, e.g. `BedroomTV.local.`.
-        host: String,
+        /// Hostname to enumerate, e.g. `BedroomTV.local.`. Omit to discover hosts.
+        host: Option<String>,
 
         #[arg(short = 't', long, default_value_t = 5)]
         timeout: u64,
@@ -322,8 +322,13 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             let opts = ProbeOptions {
                 timeout: Duration::from_secs(timeout),
             };
-            let result = probe::enum_host(&host, &opts).await?;
-            emit_host_enumeration(renderer, &result)?;
+            if let Some(host) = host {
+                let result = probe::enum_host(&host, &opts).await?;
+                emit_host_enumeration(renderer, &result)?;
+            } else {
+                let summaries = probe::discover_hosts(&opts).await?;
+                crate::output::emit_host_summaries(renderer, &summaries)?;
+            }
         }
         Cmd::Clone { instance, timeout } => {
             let cloned =
@@ -730,7 +735,23 @@ mod tests {
         let c = Cli::try_parse_from(["whodis", "enum", "BedroomTV.local."]).expect("parse");
         match c.command {
             Cmd::Enum { host, timeout } => {
-                assert_eq!(host, "BedroomTV.local.");
+                assert_eq!(host.as_deref(), Some("BedroomTV.local."));
+                assert_eq!(timeout, 5);
+            }
+            other => panic!("expected Enum, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[allow(
+        clippy::panic,
+        reason = "test assertion intentionally panics on wrong variant"
+    )]
+    fn cli_parses_enum_without_host() {
+        let c = Cli::try_parse_from(["whodis", "enum"]).expect("parse");
+        match c.command {
+            Cmd::Enum { host, timeout } => {
+                assert!(host.is_none());
                 assert_eq!(timeout, 5);
             }
             other => panic!("expected Enum, got {other:?}"),
@@ -747,7 +768,7 @@ mod tests {
             .expect("parse");
         match c.command {
             Cmd::Enum { host, timeout } => {
-                assert_eq!(host, "192-168-50-179.local.");
+                assert_eq!(host.as_deref(), Some("192-168-50-179.local."));
                 assert_eq!(timeout, 8);
             }
             other => panic!("expected Enum, got {other:?}"),

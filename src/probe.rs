@@ -92,6 +92,12 @@ pub struct ServiceTypeSummary {
     pub instance_count: usize,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct HostSummary {
+    pub host: String,
+    pub service_count: usize,
+}
+
 const META_QUERY: &str = "_services._dns-sd._udp.local.";
 
 /// Run an mDNS DNS-SD meta-query and return one summary per service type seen on the LAN,
@@ -142,6 +148,56 @@ pub async fn discover_service_types(opts: &ProbeOptions) -> Result<Vec<ServiceTy
         })
         .collect();
     summaries.sort_by(|a, b| a.fqdn.cmp(&b.fqdn));
+    Ok(summaries)
+}
+
+/// Aggregate distinct hostnames seen on the LAN.
+///
+/// Each entry is tagged with the number of distinct service types that host
+/// advertises. Mirrors [`discover_service_types`] but keys on the SRV target
+/// host rather than the service-type fqdn.
+pub async fn discover_hosts(opts: &ProbeOptions) -> Result<Vec<HostSummary>> {
+    use tokio_stream::StreamExt;
+
+    let browser = crate::browse::Browser::new(Mode::Listen)?;
+    let cancel = browser.cancel_token();
+    let stream = browser.run();
+    tokio::pin!(stream);
+
+    let mut services_by_host: HashMap<String, HashSet<String>> = HashMap::new();
+    let deadline = tokio::time::Instant::now() + opts.timeout;
+    while let Some(remaining) = deadline
+        .checked_duration_since(tokio::time::Instant::now())
+        .filter(|d| !d.is_zero())
+    {
+        match tokio::time::timeout(remaining, stream.next()).await {
+            Ok(Some(
+                crate::browse::Event::InstanceFound { instance }
+                | crate::browse::Event::InstanceUpdated { instance },
+            )) => {
+                let host = strip_trailing_dot(&instance.host).to_string();
+                if host.is_empty() {
+                    continue;
+                }
+                services_by_host
+                    .entry(host)
+                    .or_default()
+                    .insert(instance.service_type.fqdn());
+            }
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => break,
+        }
+    }
+    cancel.cancel();
+
+    let mut summaries: Vec<HostSummary> = services_by_host
+        .into_iter()
+        .map(|(host, services)| HostSummary {
+            host,
+            service_count: services.len(),
+        })
+        .collect();
+    summaries.sort_by(|a, b| a.host.cmp(&b.host));
     Ok(summaries)
 }
 

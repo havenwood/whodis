@@ -6,7 +6,7 @@ use std::io::{self, IsTerminal, Write};
 use serde::Serialize;
 
 use crate::browse::Event;
-use crate::probe::{HostEnumeration, ServiceTypeSummary};
+use crate::probe::{HostEnumeration, HostSummary, ServiceTypeSummary};
 use crate::types::HostAnswer;
 use crate::types::{Device, Fingerprint, Instance};
 
@@ -104,6 +104,30 @@ pub(crate) fn emit_service_type_summaries(
                     "  {:<width$}   {} {}",
                     s.fqdn, s.instance_count, plural
                 )?;
+            }
+            Ok(())
+        }
+    }
+}
+
+pub(crate) fn emit_host_summaries(renderer: Renderer, summaries: &[HostSummary]) -> io::Result<()> {
+    match renderer {
+        Renderer::Jsonl => {
+            for s in summaries {
+                emit_jsonl(s)?;
+            }
+            Ok(())
+        }
+        Renderer::Pretty(_) => {
+            let mut out = io::stdout().lock();
+            let width = summaries.iter().map(|s| s.host.len()).max().unwrap_or(0);
+            for s in summaries {
+                let plural = if s.service_count == 1 {
+                    "service"
+                } else {
+                    "services"
+                };
+                writeln!(out, "  {:<width$}   {} {}", s.host, s.service_count, plural)?;
             }
             Ok(())
         }
