@@ -33,7 +33,7 @@ impl Default for ProbeOptions {
 }
 
 pub async fn probe_service(service: &ServiceType, opts: &ProbeOptions) -> Result<Vec<Instance>> {
-    let transport = Transport::build(Mode::QueryOnly)?;
+    let transport = Transport::build(Mode::Listen)?;
     let qname = parse_name(&service.fqdn())?;
     let msg = build_query(&qname, RecordType::PTR);
     let first_window = opts.timeout / 2;
@@ -62,7 +62,7 @@ pub async fn probe_instance(
     service: &ServiceType,
     opts: &ProbeOptions,
 ) -> Result<Vec<Instance>> {
-    let transport = Transport::build(Mode::QueryOnly)?;
+    let transport = Transport::build(Mode::Listen)?;
     let fqdn = format!("{}.{}", instance_name, service.fqdn());
     let qname = parse_name(&fqdn)?;
     let mut msg = build_query(&qname, RecordType::SRV);
@@ -76,7 +76,7 @@ pub async fn probe_instance(
 }
 
 pub async fn probe_host(host: &str, opts: &ProbeOptions) -> Result<Vec<HostAnswer>> {
-    let transport = Transport::build(Mode::QueryOnly)?;
+    let transport = Transport::build(Mode::Listen)?;
     let qname = parse_name(host)?;
     let mut msg = build_query(&qname, RecordType::A);
     msg.add_query(Query::query(qname.clone(), RecordType::AAAA));
@@ -97,83 +97,111 @@ const META_QUERY: &str = "_services._dns-sd._udp.local.";
 /// Run an mDNS DNS-SD meta-query and return one summary per service type seen on the LAN,
 /// each tagged with the number of distinct instances it is currently advertising.
 pub async fn discover_service_types(opts: &ProbeOptions) -> Result<Vec<ServiceTypeSummary>> {
-    let transport = Transport::build(Mode::QueryOnly)?;
-    let half = opts.timeout / 2;
+    let transport = Transport::build(Mode::Listen)?;
 
-    // Phase 1: ask for service-type names.
-    let meta_q = build_query(&parse_name(META_QUERY)?, RecordType::PTR);
-    let types: Vec<ServiceType> =
-        send_and_collect(&transport, &meta_q, half, decode_service_types).await?;
-
-    let mut unique: Vec<ServiceType> = types;
-    unique.sort_by(|a, b| (a.protocol.as_str(), &a.name).cmp(&(b.protocol.as_str(), &b.name)));
-    unique.dedup();
-    if unique.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    // Phase 2: ask for instance PTRs of every discovered type in one batch.
+    // Send the DNS-SD meta-query plus PTR queries for a curated set of common service
+    // types. Many macOS responders ignore the meta-query directly but answer per-type
+    // PTRs and re-multicast their announcements, which we receive via the joined group.
     let mut q_msg = Message::new(0, MessageType::Query, OpCode::Query);
     q_msg
         .set_message_type(MessageType::Query)
         .set_op_code(OpCode::Query)
         .set_recursion_desired(false);
-    for st in &unique {
-        let n = parse_name(&st.fqdn())?;
+    for name in COMMON_SERVICE_QUERIES {
+        let n = parse_name(name)?;
         let mut q = Query::query(n, RecordType::PTR);
         q.set_query_class(DNSClass::IN);
         q_msg.add_query(q);
     }
 
-    let pairs: Vec<(String, String)> =
-        send_and_collect(&transport, &q_msg, half, decode_ptr_pairs).await?;
+    let records: Vec<Record> =
+        send_and_collect(&transport, &q_msg, opts.timeout, <[Record]>::to_vec).await?;
 
-    let mut counts: HashMap<String, HashSet<String>> = HashMap::with_capacity(unique.len());
-    for (owner, target) in pairs {
-        counts.entry(owner).or_default().insert(target);
+    // Derive both service types and instance counts in one pass. Any PTR record whose
+    // owner matches the `_<svc>._<proto>.local.` pattern reveals a service type, and
+    // each unique target is an instance.
+    let mut counts: HashMap<String, HashSet<String>> = HashMap::new();
+    for r in &records {
+        if r.record_type() != RecordType::PTR {
+            continue;
+        }
+        let owner = r.name().to_string();
+        let owner_norm = owner.trim_end_matches('.');
+        let svc_fqdn_owner = parse_service_type_from_name(&owner).map(|st| st.fqdn());
+        if let Some(RData::PTR(ptr)) = r.data() {
+            let target = ptr.0.to_string();
+            if owner_norm == META_QUERY.trim_end_matches('.') {
+                if let Some(st) = parse_service_type_from_name(&target) {
+                    counts.entry(st.fqdn()).or_default();
+                }
+            } else if let Some(svc_fqdn) = svc_fqdn_owner {
+                counts.entry(svc_fqdn).or_default().insert(target);
+            }
+        }
     }
 
-    Ok(unique
+    let mut summaries: Vec<ServiceTypeSummary> = counts
         .into_iter()
-        .map(|st| {
-            let fqdn = st.fqdn();
-            let instance_count = counts.get(&fqdn).map_or(0, HashSet::len);
-            ServiceTypeSummary {
-                fqdn,
-                instance_count,
-            }
+        .map(|(fqdn, instances)| ServiceTypeSummary {
+            fqdn,
+            instance_count: instances.len(),
         })
-        .collect())
+        .collect();
+    summaries.sort_by(|a, b| a.fqdn.cmp(&b.fqdn));
+    Ok(summaries)
 }
+
+/// Service-type queries we always probe for. Includes the DNS-SD meta-query and a
+/// curated list of frequently-deployed types so we elicit responses even from
+/// responders that ignore the meta-query. Service types not listed here are still
+/// discovered through ambient announcements that arrive on the joined multicast group.
+const COMMON_SERVICE_QUERIES: &[&str] = &[
+    META_QUERY,
+    "_airplay._tcp.local.",
+    "_raop._tcp.local.",
+    "_ipp._tcp.local.",
+    "_ipps._tcp.local.",
+    "_printer._tcp.local.",
+    "_pdl-datastream._tcp.local.",
+    "_http._tcp.local.",
+    "_https._tcp.local.",
+    "_smb._tcp.local.",
+    "_ssh._tcp.local.",
+    "_sftp-ssh._tcp.local.",
+    "_googlecast._tcp.local.",
+    "_googlezone._tcp.local.",
+    "_hap._tcp.local.",
+    "_homekit._tcp.local.",
+    "_companion-link._tcp.local.",
+    "_apple-mobdev2._tcp.local.",
+    "_remotepairing._tcp.local.",
+    "_amzn-wplay._tcp.local.",
+    "_alexa._tcp.local.",
+    "_spotify-connect._tcp.local.",
+    "_meshcop._udp.local.",
+];
 
 fn decode_service_types(records: &[Record]) -> Vec<ServiceType> {
-    records
-        .iter()
-        .filter_map(|r| {
-            if r.record_type() != RecordType::PTR
-                || r.name().to_string().trim_end_matches('.') != META_QUERY.trim_end_matches('.')
-            {
-                return None;
-            }
-            match r.data() {
-                Some(RData::PTR(ptr)) => parse_service_type_from_name(&ptr.0.to_string()),
-                _ => None,
-            }
-        })
-        .collect()
-}
-
-fn decode_ptr_pairs(records: &[Record]) -> Vec<(String, String)> {
+    let meta_norm = META_QUERY.trim_end_matches('.');
     records
         .iter()
         .filter_map(|r| {
             if r.record_type() != RecordType::PTR {
                 return None;
             }
-            match r.data() {
-                Some(RData::PTR(ptr)) => Some((r.name().to_string(), ptr.0.to_string())),
-                _ => None,
+            let owner = r.name().to_string();
+            // Case 1: a meta-query response -- owner is `_services._dns-sd._udp.local.`,
+            // PTR target points at a service-type fqdn.
+            if owner.trim_end_matches('.') == meta_norm {
+                return match r.data() {
+                    Some(RData::PTR(ptr)) => parse_service_type_from_name(&ptr.0.to_string()),
+                    _ => None,
+                };
             }
+            // Case 2: an ambient service announcement -- owner IS the service-type fqdn,
+            // e.g. `_airplay._tcp.local. -> Foo._airplay._tcp.local.`. macOS responders
+            // mostly publish via this shape rather than answering the meta-query directly.
+            parse_service_type_from_name(&owner)
         })
         .collect()
 }
@@ -392,7 +420,7 @@ pub struct HostServiceMatch {
 }
 
 pub async fn enum_host(host: &str, opts: &ProbeOptions) -> Result<HostEnumeration> {
-    let transport = Transport::build(Mode::QueryOnly)?;
+    let transport = Transport::build(Mode::Listen)?;
     let half = opts.timeout / 2;
 
     // Phase 1: discover service types via meta-query.

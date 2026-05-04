@@ -550,9 +550,17 @@ mod tests {
         use hickory_proto::rr::rdata::A as ARData;
 
         let t = AnswerTableBuilder::new()
-            .answer("a.local.", RecordType::A, RData::A(ARData(Ipv4Addr::new(1, 2, 3, 4))))
+            .answer(
+                "a.local.",
+                RecordType::A,
+                RData::A(ARData(Ipv4Addr::new(1, 2, 3, 4))),
+            )
             .expect("a")
-            .answer("b.local.", RecordType::A, RData::A(ARData(Ipv4Addr::new(5, 6, 7, 8))))
+            .answer(
+                "b.local.",
+                RecordType::A,
+                RData::A(ARData(Ipv4Addr::new(5, 6, 7, 8))),
+            )
             .expect("b")
             .build();
         let responses: Vec<_> = t.iter_responses().collect();
@@ -591,11 +599,18 @@ mod tests {
     fn lookup_response_detects_owned_name() {
         use hickory_proto::rr::rdata::A as ARData;
         let t = AnswerTableBuilder::new()
-            .answer("our.local.", RecordType::A, RData::A(ARData(Ipv4Addr::new(1, 2, 3, 4))))
+            .answer(
+                "our.local.",
+                RecordType::A,
+                RData::A(ARData(Ipv4Addr::new(1, 2, 3, 4))),
+            )
             .expect("answer")
             .build();
         assert!(t.lookup_response("our.local.", RecordType::A).is_some());
         assert!(t.lookup_response("OUR.LOCAL", RecordType::A).is_some());
-        assert!(t.lookup_response("not-ours.local.", RecordType::A).is_none());
+        assert!(
+            t.lookup_response("not-ours.local.", RecordType::A)
+                .is_none()
+        );
     }
 }

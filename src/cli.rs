@@ -412,14 +412,21 @@ fn event_matches_filter(event: &Event, filter: Option<&str>) -> bool {
     let filter = filter.trim_end_matches('.').to_ascii_lowercase();
     match event {
         Event::ServiceTypeFound { service_type } => {
-            service_type.fqdn().trim_end_matches('.').to_ascii_lowercase() == filter
+            service_type
+                .fqdn()
+                .trim_end_matches('.')
+                .to_ascii_lowercase()
+                == filter
         }
         Event::InstanceFound { instance } | Event::InstanceUpdated { instance } => {
-            instance.service_type.fqdn().trim_end_matches('.').to_ascii_lowercase() == filter
+            instance
+                .service_type
+                .fqdn()
+                .trim_end_matches('.')
+                .to_ascii_lowercase()
+                == filter
         }
-        Event::InstanceGoodbye { fqdn } => {
-            fqdn.to_ascii_lowercase().contains(&filter)
-        }
+        Event::InstanceGoodbye { fqdn } => fqdn.to_ascii_lowercase().contains(&filter),
     }
 }
 
@@ -797,7 +804,9 @@ mod tests {
 
     #[test]
     fn filter_passes_everything_when_none() {
-        let event = crate::browse::Event::InstanceGoodbye { fqdn: "X._airplay._tcp.local.".into() };
+        let event = crate::browse::Event::InstanceGoodbye {
+            fqdn: "X._airplay._tcp.local.".into(),
+        };
         assert!(event_matches_filter(&event, None));
     }
 }
