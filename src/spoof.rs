@@ -120,7 +120,9 @@ impl AnswerTableBuilder {
                 .set_authoritative(true)
                 .set_response_code(ResponseCode::NoError);
             for r in &e.records {
-                msg.add_answer(r.clone());
+                let mut owned = r.clone();
+                owned.set_mdns_cache_flush(true);
+                msg.add_answer(owned);
             }
             attach_additionals(&mut msg, &e.records, e.qtype, &by_key);
             if let Ok(bytes) = msg.to_bytes() {
@@ -430,6 +432,33 @@ mod tests {
             .build();
         assert!(t.lookup("spoofed.local.", RecordType::A).is_some());
         assert!(t.lookup("SPOOFED.LOCAL", RecordType::A).is_some());
+    }
+
+    #[test]
+    fn answer_records_have_cache_flush_set() {
+        use hickory_proto::rr::rdata::A as ARData;
+
+        let table = AnswerTableBuilder::new()
+            .answer(
+                "x.local.",
+                RecordType::A,
+                RData::A(ARData(Ipv4Addr::new(1, 2, 3, 4))),
+            )
+            .expect("answer")
+            .build();
+        let bytes = table.lookup("x.local.", RecordType::A).expect("lookup");
+        let msg = Message::from_bytes(bytes).expect("parse");
+        let answer = msg.answers().first().expect("answer");
+        assert!(
+            answer.mdns_cache_flush,
+            "answer record should have cache-flush bit set"
+        );
+        for additional in msg.additionals() {
+            assert!(
+                !additional.mdns_cache_flush,
+                "additional record should not have cache-flush bit set"
+            );
+        }
     }
 
     #[test]

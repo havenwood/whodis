@@ -64,6 +64,7 @@ pub(crate) trait RecordExt {
     fn ttl(&self) -> u32;
     fn data(&self) -> Option<&RData>;
     fn set_dns_class(&mut self, dns_class: DNSClass);
+    fn set_mdns_cache_flush(&mut self, flag: bool);
 }
 
 impl RecordExt for Record {
@@ -81,6 +82,10 @@ impl RecordExt for Record {
 
     fn set_dns_class(&mut self, dns_class: DNSClass) {
         self.dns_class = dns_class;
+    }
+
+    fn set_mdns_cache_flush(&mut self, flag: bool) {
+        self.mdns_cache_flush = flag;
     }
 }
 
