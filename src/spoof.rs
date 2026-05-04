@@ -114,7 +114,21 @@ impl AnswerTableBuilder {
                 map.insert((normalize(&e.name), e.qtype), bytes);
             }
         }
-        AnswerTable { map }
+
+        let mut srv_ports: Vec<u16> = Vec::new();
+        for e in &entries {
+            if e.qtype == RecordType::SRV {
+                for r in &e.records {
+                    if let Some(RData::SRV(srv)) = r.data() {
+                        srv_ports.push(srv.port());
+                    }
+                }
+            }
+        }
+        srv_ports.sort_unstable();
+        srv_ports.dedup();
+
+        AnswerTable { map, srv_ports }
     }
 }
 
@@ -174,6 +188,7 @@ fn push_records(
 #[derive(Debug, Clone, Default)]
 pub struct AnswerTable {
     map: HashMap<(String, RecordType), Vec<u8>>,
+    srv_ports: Vec<u16>,
 }
 
 impl AnswerTable {
@@ -190,6 +205,11 @@ impl AnswerTable {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
+    }
+
+    #[must_use]
+    pub fn srv_ports(&self) -> &[u16] {
+        &self.srv_ports
     }
 }
 

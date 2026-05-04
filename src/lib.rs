@@ -10,6 +10,7 @@ mod cli;
 mod error;
 mod mode;
 mod output;
+mod relay;
 mod spoof_table;
 mod transport;
 mod types;

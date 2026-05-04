@@ -1,6 +1,6 @@
 //! CLI argument parsing and subcommand dispatch.
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use anyhow::Context;
@@ -120,6 +120,10 @@ pub enum Cmd {
 
         #[arg(long = "allow-instance", value_name = "NAME")]
         allow_instance: Vec<String>,
+
+        /// Bridge inbound TCP on spoofed ports to HOST:PORT (full MITM).
+        #[arg(long, value_name = "HOST:PORT")]
+        relay: Option<SocketAddr>,
     },
 
     /// Enumerate every service a single host advertises.
@@ -230,8 +234,10 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             burst,
             allow,
             allow_instance,
+            relay,
         } => {
-            run_spoof(renderer, table, template, name, ip, burst, allow, allow_instance).await?;
+            run_spoof(renderer, table, template, name, ip, burst, allow, allow_instance, relay)
+                .await?;
         }
         Cmd::Enum { host, timeout } => {
             let opts = ProbeOptions {
@@ -390,6 +396,7 @@ async fn run_spoof(
     burst: u8,
     allow: Vec<IpNet>,
     allow_instance: Vec<String>,
+    relay: Option<SocketAddr>,
 ) -> anyhow::Result<()> {
     let table = if let Some(tmpl) = template {
         if table_path.is_some() {
@@ -411,8 +418,14 @@ async fn run_spoof(
     for inst_name in allow_instance {
         auth = auth.allow_instance(inst_name);
     }
+    let ports = table.srv_ports().to_vec();
     let resp = crate::spoof::Responder::new(Mode::Authoritative, auth, table, burst)?;
     let cancel = resp.cancel_token();
+    if let Some(target) = relay {
+        if let Err(e) = crate::relay::run(&ports, target, cancel.clone()).await {
+            tracing::error!(error = %e, "relay setup failed");
+        }
+    }
     let task = tokio::spawn(async move { resp.run().await });
     tokio::signal::ctrl_c().await.ok();
     cancel.cancel();

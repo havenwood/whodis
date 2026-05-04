@@ -107,6 +107,15 @@ data = "192.168.1.42"
 
 Supported `qtype` values: `A`, `AAAA`, `PTR`, `SRV`, `TXT`. The responder bundles related records as DNS additionals automatically (PTR responses include matching SRV / TXT / A / AAAA), so a single client query is enough to fully discover the spoofed instance.
 
+With `--relay HOST:PORT`, whodis additionally listens on every port advertised in the answer table's SRV records and bridges incoming TCP connections to HOST:PORT. Combined with `flood conflict` against the real target, this is a full discovery + traffic MITM.
+
+```sh
+# Spoof Apple TV in the AirPlay picker, bridge AirPlay traffic to the real one
+whodis spoof --template airplay --name FakeATV --ip 192.168.50.108 \
+    --allow 192.168.50.0/24 \
+    --relay 192.168.50.20:7000
+```
+
 ## Flood
 
 Disruptive. `goodbye` sends TTL=0 records to make neighbors re-announce (good for harvesting fresh TXT). `conflict` sends authoritative records that conflict with the target's claimed name, forcing a rename per RFC 6762 sec 9.
