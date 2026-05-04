@@ -140,6 +140,11 @@ pub enum Cmd {
         /// Bridge inbound TCP on spoofed ports to HOST:PORT (full MITM).
         #[arg(long, value_name = "HOST:PORT")]
         relay: Option<SocketAddr>,
+
+        /// Periodically multicast our spoofed records to push them into client caches.
+        /// 0 means only reply to incoming queries (default).
+        #[arg(long, value_name = "SECS", default_value_t = 0)]
+        reannounce_interval: u64,
     },
 
     /// Enumerate every service a single host advertises.
@@ -258,6 +263,10 @@ fn parse_positive_usize(s: &str) -> std::result::Result<usize, String> {
     Ok(value)
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "run is a dispatch table over Cmd variants; splitting adds noise"
+)]
 pub async fn run(cli: Cli) -> anyhow::Result<()> {
     init_tracing(cli.quiet, cli.verbose);
     if !cli.interface.is_empty() {
@@ -292,6 +301,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             allow,
             allow_instance,
             relay,
+            reannounce_interval,
         } => {
             run_spoof(
                 renderer,
@@ -303,6 +313,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
                 allow,
                 allow_instance,
                 relay,
+                reannounce_interval,
                 scope,
             )
             .await?;
@@ -521,6 +532,7 @@ async fn run_spoof(
     allow: Vec<IpNet>,
     allow_instance: Vec<String>,
     relay: Option<SocketAddr>,
+    reannounce_interval: u64,
     scope: Option<crate::scope::Scope>,
 ) -> anyhow::Result<()> {
     let table = if let Some(tmpl) = template {
@@ -549,7 +561,12 @@ async fn run_spoof(
         a
     };
     let ports = table.srv_ports().to_vec();
-    let resp = crate::spoof::Responder::new(Mode::Authoritative, auth, table, burst)?;
+    let interval = if reannounce_interval == 0 {
+        None
+    } else {
+        Some(std::time::Duration::from_secs(reannounce_interval))
+    };
+    let resp = crate::spoof::Responder::new(Mode::Authoritative, auth, table, burst, interval)?;
     let cancel = resp.cancel_token();
     if let Some(target) = relay {
         crate::relay::run(&ports, target, cancel.clone()).await?;

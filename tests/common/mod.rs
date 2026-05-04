@@ -59,7 +59,7 @@ pub(crate) fn fake_appletv_table() -> AnswerTable {
 }
 
 pub(crate) fn spawn_test_responder(table: AnswerTable) -> Responder {
-    Responder::new(test_mode(), whodis::Authorization::new(), table, 1).expect("responder")
+    Responder::new(test_mode(), whodis::Authorization::new(), table, 1, None).expect("responder")
 }
 
 /// Build and send a single mDNS response containing PTR + SRV + TXT records

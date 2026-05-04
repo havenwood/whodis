@@ -241,6 +241,10 @@ pub(crate) struct ResponseEntry {
 }
 
 impl AnswerTable {
+    pub(crate) fn iter_responses(&self) -> impl Iterator<Item = &[u8]> {
+        self.map.values().map(|response| response.bytes.as_slice())
+    }
+
     #[must_use]
     pub fn lookup(&self, name: &str, qtype: RecordType) -> Option<&[u8]> {
         self.lookup_response(name, qtype)
@@ -277,11 +281,18 @@ pub struct Responder {
     auth: Authorization,
     table: Arc<AnswerTable>,
     burst: u8,
+    reannounce_interval: Option<Duration>,
     cancel: CancellationToken,
 }
 
 impl Responder {
-    pub fn new(mode: Mode, auth: Authorization, table: AnswerTable, burst: u8) -> Result<Self> {
+    pub fn new(
+        mode: Mode,
+        auth: Authorization,
+        table: AnswerTable,
+        burst: u8,
+        reannounce_interval: Option<Duration>,
+    ) -> Result<Self> {
         if !mode.sends_responses() {
             return Err(Error::InvalidServiceType(format!(
                 "Responder requires Authoritative or Custom mode, got {mode:?}"
@@ -294,6 +305,7 @@ impl Responder {
             auth,
             table: Arc::new(table),
             burst: burst.max(1),
+            reannounce_interval,
             cancel: CancellationToken::new(),
         })
     }
@@ -306,10 +318,29 @@ impl Responder {
     pub async fn run(self) -> Result<()> {
         let v4 = self.transport.v4();
         let v6 = self.transport.v6();
+
+        let reannounce_handle = match self.reannounce_interval {
+            Some(interval) if !interval.is_zero() => {
+                let table = self.table.clone();
+                let transport = self.transport.clone();
+                let cancel = self.cancel.clone();
+                Some(tokio::spawn(async move {
+                    run_reannounce(transport, table, interval, cancel).await;
+                }))
+            }
+            _ => None,
+        };
+
         let mut buf = vec![0u8; 9000];
         loop {
             tokio::select! {
-                () = self.cancel.cancelled() => return Ok(()),
+                () = self.cancel.cancelled() => {
+                    if let Some(h) = reannounce_handle {
+                        h.abort();
+                        let _joined = h.await;
+                    }
+                    return Ok(());
+                }
                 r = recv_one(v4.as_ref(), v6.as_ref(), &mut buf) => {
                     match r {
                         Ok(Some((n, src))) => {
@@ -356,6 +387,32 @@ impl Responder {
                     }
                 }
                 tracing::info!(query = %name, qtype = ?q.query_type(), %src, "spoofed");
+            }
+        }
+    }
+}
+
+async fn run_reannounce(
+    transport: Arc<Transport>,
+    table: Arc<AnswerTable>,
+    interval: Duration,
+    cancel: CancellationToken,
+) {
+    let mut ticker = tokio::time::interval(interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            () = cancel.cancelled() => return,
+            _ = ticker.tick() => {
+                let mut count = 0_usize;
+                for bytes in table.iter_responses() {
+                    if let Err(e) = transport.send_query(bytes, crate::transport::Destination::Multicast).await {
+                        tracing::debug!(error = %e, "reannounce send failed");
+                    } else {
+                        count += 1;
+                    }
+                }
+                tracing::debug!(announces = count, "reannounce tick");
             }
         }
     }
@@ -458,6 +515,23 @@ mod tests {
                 !additional.mdns_cache_flush,
                 "additional record should not have cache-flush bit set"
             );
+        }
+    }
+
+    #[test]
+    fn iter_responses_yields_one_per_entry() {
+        use hickory_proto::rr::rdata::A as ARData;
+
+        let t = AnswerTableBuilder::new()
+            .answer("a.local.", RecordType::A, RData::A(ARData(Ipv4Addr::new(1, 2, 3, 4))))
+            .expect("a")
+            .answer("b.local.", RecordType::A, RData::A(ARData(Ipv4Addr::new(5, 6, 7, 8))))
+            .expect("b")
+            .build();
+        let responses: Vec<_> = t.iter_responses().collect();
+        assert_eq!(responses.len(), 2);
+        for r in responses {
+            assert!(r.len() > 12);
         }
     }
 

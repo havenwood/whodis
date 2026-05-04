@@ -87,6 +87,8 @@ Templates: `airplay`, `raop`, `ipp`, `smb`, `ssh`, `googlecast`. Each generates 
 
 `--relay HOST:PORT` adds a TCP bridge. whodis listens on every port the spoof advertises and forwards new connections to the real device. Combine with `flood conflict` for full discovery + traffic MITM. Connection events and byte counts log to stderr.
 
+`--reannounce-interval SECS` makes the responder push unsolicited multicast announcements every SECS seconds. Combined with the cache-flush bit (always set on authoritative records), this evicts any cached entries from the legitimate device on receivers that already had it. 0 means only reply to queries (default). Try 30 for steady churn or 5 for aggressive cache-poisoning.
+
 ```sh
 whodis spoof --template airplay --name FakeATV --ip 10.0.5.42 \
     --allow 10.0.5.0/24 \
