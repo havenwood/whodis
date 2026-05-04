@@ -183,7 +183,7 @@ JSONL on stdout by default. `--pretty` switches to human view (auto on a TTY). `
 
 ## Authorization
 
-`spoof` and `flood` accept `--allow CIDR` and `--allow-instance NAME`, both repeatable. An empty allow-list emits one warning and proceeds. A mismatched allow-list logs the blocked target and exits non-zero.
+`spoof` accepts `--allow CIDR` and `--allow-instance NAME`. `flood` accepts `--allow-instance NAME` only (it multicasts, no per-target IP). Both are repeatable. An empty allow-list emits one warning and proceeds. A mismatched allow-list logs the blocked target and exits non-zero.
 
 For an engagement, declare scope once and reuse:
 

@@ -340,8 +340,12 @@ fn decode_instances(service: &ServiceType, records: &[Record]) -> Vec<Instance> 
 }
 
 fn decode_host_answers(host: &str, records: &[Record]) -> Vec<HostAnswer> {
+    let host_norm = strip_trailing_dot(host).to_ascii_lowercase();
     let mut addrs: Vec<IpAddr> = Vec::with_capacity(2);
     for r in records {
+        if !matches_host(&r.name().to_string(), &host_norm) {
+            continue;
+        }
         match r.data() {
             Some(RData::A(A(ip))) => addrs.push(IpAddr::V4(*ip)),
             Some(RData::AAAA(AAAA(ip))) => addrs.push(IpAddr::V6(*ip)),

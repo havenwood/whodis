@@ -27,7 +27,6 @@ hickory-proto = { version = "0.26.1", default-features = false, features = ["std
 get_if_addrs = "0.5.3"
 nix = { version = "0.31.2", default-features = false, features = ["net"] }
 dashmap = "6.1"
-phf = { version = "0.13", features = ["macros"] }
 governor = "0.10"
 ipnet = { version = "2.12", features = ["serde"] }
 bytes = "1.11"
