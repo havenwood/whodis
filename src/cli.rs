@@ -30,6 +30,11 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Cmd,
 
+    /// Path to a TOML scope file (also via `WHODIS_SCOPE` env). Pre-populates
+    /// allow-list for spoof and flood.
+    #[arg(global = true, long, value_name = "FILE", env = "WHODIS_SCOPE")]
+    pub scope: Option<std::path::PathBuf>,
+
     #[arg(global = true, long, value_enum, default_value_t = ColorChoice::Auto)]
     pub color: ColorChoice,
 
@@ -212,6 +217,10 @@ fn parse_positive_usize(s: &str) -> std::result::Result<usize, String> {
 pub async fn run(cli: Cli) -> anyhow::Result<()> {
     init_tracing(cli.quiet, cli.verbose);
     let renderer = pick_renderer(&cli);
+    let scope = match cli.scope.as_deref() {
+        Some(p) => Some(crate::scope::Scope::load(p)?),
+        None => None,
+    };
     match cli.command {
         Cmd::Browse {
             timeout,
@@ -236,7 +245,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             allow_instance,
             relay,
         } => {
-            run_spoof(renderer, table, template, name, ip, burst, allow, allow_instance, relay)
+            run_spoof(renderer, table, template, name, ip, burst, allow, allow_instance, relay, scope)
                 .await?;
         }
         Cmd::Enum { host, timeout } => {
@@ -246,7 +255,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             let result = probe::enum_host(&host, &opts).await?;
             emit_host_enumeration(renderer, &result)?;
         }
-        Cmd::Flood { kind } => run_flood(kind).await?,
+        Cmd::Flood { kind } => run_flood(kind, scope).await?,
         Cmd::Capture { pcap, timeout } => {
             let count = crate::capture::run(&pcap, timeout).await?;
             tracing::info!(packets = count, file = %pcap.display(), "capture complete");
@@ -397,6 +406,7 @@ async fn run_spoof(
     allow: Vec<IpNet>,
     allow_instance: Vec<String>,
     relay: Option<SocketAddr>,
+    scope: Option<crate::scope::Scope>,
 ) -> anyhow::Result<()> {
     let table = if let Some(tmpl) = template {
         if table_path.is_some() {
@@ -411,13 +421,18 @@ async fn run_spoof(
             .with_context(|| format!("reading {}", path.display()))?;
         crate::spoof_table::load(&raw)?
     };
-    let mut auth = Authorization::new();
-    for cidr in allow {
-        auth = auth.allow_subnet(cidr);
-    }
-    for inst_name in allow_instance {
-        auth = auth.allow_instance(inst_name);
-    }
+    let auth = if let Some(s) = scope {
+        s.into_auth(allow, allow_instance)
+    } else {
+        let mut a = Authorization::new();
+        for cidr in allow {
+            a = a.allow_subnet(cidr);
+        }
+        for inst_name in allow_instance {
+            a = a.allow_instance(inst_name);
+        }
+        a
+    };
     let ports = table.srv_ports().to_vec();
     let resp = crate::spoof::Responder::new(Mode::Authoritative, auth, table, burst)?;
     let cancel = resp.cancel_token();
@@ -439,7 +454,7 @@ async fn run_spoof(
     clippy::needless_pass_by_value,
     reason = "FloodCmd must be owned to destructure in match arms"
 )]
-async fn run_flood(kind: FloodCmd) -> anyhow::Result<()> {
+async fn run_flood(kind: FloodCmd, scope: Option<crate::scope::Scope>) -> anyhow::Result<()> {
     use std::num::NonZeroU32;
 
     let sent = match kind {
@@ -450,7 +465,7 @@ async fn run_flood(kind: FloodCmd) -> anyhow::Result<()> {
             count,
             forever,
         } => {
-            let auth = build_auth(allow_instance);
+            let auth = build_auth(allow_instance, scope);
             let opts = FloodOptions {
                 rate_pps: NonZeroU32::new(rate).unwrap_or(NonZeroU32::MIN),
                 count: if forever { 0 } else { count },
@@ -464,7 +479,7 @@ async fn run_flood(kind: FloodCmd) -> anyhow::Result<()> {
             count,
             forever,
         } => {
-            let auth = build_auth(allow_instance);
+            let auth = build_auth(allow_instance, scope);
             let opts = FloodOptions {
                 rate_pps: NonZeroU32::new(rate).unwrap_or(NonZeroU32::MIN),
                 count: if forever { 0 } else { count },
@@ -479,12 +494,16 @@ async fn run_flood(kind: FloodCmd) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn build_auth(allow_instance: Vec<String>) -> Authorization {
-    let mut auth = Authorization::new();
-    for name in allow_instance {
-        auth = auth.allow_instance(name);
+fn build_auth(allow_instance: Vec<String>, scope: Option<crate::scope::Scope>) -> Authorization {
+    if let Some(s) = scope {
+        s.into_auth(Vec::new(), allow_instance)
+    } else {
+        let mut auth = Authorization::new();
+        for name in allow_instance {
+            auth = auth.allow_instance(name);
+        }
+        auth
     }
-    auth
 }
 
 fn parse_service(s: &str) -> WhResult<ServiceType> {

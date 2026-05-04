@@ -1,0 +1,121 @@
+//! Engagement scope file loader.
+//!
+//! A TOML file declaring engagement-wide allow-lists (subnets and instance names)
+//! plus optional output paths. Auto-applied to every subcommand. CLI flags still
+//! work and stack on top.
+//!
+//! Schema:
+//!
+//! ```toml
+//! allow_subnet   = ["10.0.5.0/24"]
+//! allow_instance = ["LivingRoomTV"]
+//! log_dir        = "./engagement-logs"
+//! ```
+
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, anyhow};
+use ipnet::IpNet;
+use serde::Deserialize;
+
+use crate::auth::Authorization;
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub(crate) struct Scope {
+    #[serde(default)]
+    pub(crate) allow_subnet: Vec<IpNet>,
+    #[serde(default)]
+    pub(crate) allow_instance: Vec<String>,
+    #[serde(default)]
+    #[allow(dead_code, reason = "log_dir is a placeholder for the planned `report` subcommand (F8)")]
+    pub(crate) log_dir: Option<PathBuf>,
+}
+
+impl Scope {
+    pub(crate) fn load(path: &Path) -> anyhow::Result<Self> {
+        let raw = std::fs::read_to_string(path)
+            .with_context(|| format!("reading scope file {}", path.display()))?;
+        let scope: Self = toml::from_str(&raw).context("parsing scope file")?;
+        if scope.allow_subnet.is_empty() && scope.allow_instance.is_empty() {
+            return Err(anyhow!(
+                "scope file at {} declares neither allow_subnet nor allow_instance; refusing as misconfigured",
+                path.display()
+            ));
+        }
+        Ok(scope)
+    }
+
+    /// Build an `Authorization` from this scope, then layer additional CLI-passed
+    /// subnets and instances on top.
+    #[must_use]
+    pub(crate) fn into_auth(self, extra_subnets: Vec<IpNet>, extra_instances: Vec<String>) -> Authorization {
+        let mut auth = Authorization::new();
+        for net in self.allow_subnet {
+            auth = auth.allow_subnet(net);
+        }
+        for name in self.allow_instance {
+            auth = auth.allow_instance(name);
+        }
+        for net in extra_subnets {
+            auth = auth.allow_subnet(net);
+        }
+        for name in extra_instances {
+            auth = auth.allow_instance(name);
+        }
+        auth
+    }
+
+    #[must_use]
+    #[allow(dead_code, reason = "log_dir accessor is a placeholder for the planned `report` subcommand (F8)")]
+    pub(crate) fn log_dir(&self) -> Option<&Path> {
+        self.log_dir.as_deref()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loads_basic_scope() {
+        let toml = r#"
+            allow_subnet = ["10.0.5.0/24"]
+            allow_instance = ["Foo"]
+        "#;
+        let s: Scope = toml::from_str(toml).expect("parse");
+        assert_eq!(s.allow_subnet.len(), 1);
+        assert_eq!(s.allow_instance, vec!["Foo".to_string()]);
+        assert!(s.log_dir.is_none());
+    }
+
+    #[test]
+    fn rejects_empty_scope_via_load() {
+        let dir = tempdir_or_skip();
+        let path = dir.join("scope.toml");
+        std::fs::write(&path, "log_dir = \"./out\"\n").expect("write");
+        assert!(Scope::load(&path).is_err());
+    }
+
+    #[test]
+    fn into_auth_layers_extras() {
+        let s = Scope {
+            allow_subnet: vec!["10.0.0.0/8".parse().expect("net")],
+            allow_instance: vec!["Foo".into()],
+            log_dir: None,
+        };
+        let auth = s.into_auth(
+            vec!["192.168.1.0/24".parse().expect("net")],
+            vec!["Bar".into()],
+        );
+        assert!(auth.permits_addr("10.0.0.5".parse().expect("addr")));
+        assert!(auth.permits_addr("192.168.1.5".parse().expect("addr")));
+        assert!(auth.permits_instance("Foo"));
+        assert!(auth.permits_instance("Bar"));
+    }
+
+    fn tempdir_or_skip() -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!("whodis-scope-test-{}", std::process::id()));
+        std::fs::create_dir_all(&p).expect("create temp");
+        p
+    }
+}

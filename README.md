@@ -191,3 +191,21 @@ JSONL on stdout by default. `--pretty` switches to human view (auto on a TTY). `
 ## Authorization
 
 `spoof` and `flood` accept `--allow CIDR` and `--allow-instance NAME` (both repeatable). Empty allow-list warns once and proceeds.
+
+## Scope file
+
+For an engagement, declare allow-lists once in a TOML scope file and pass it everywhere:
+
+```toml
+# whodis-scope.toml
+allow_subnet   = ["10.0.5.0/24"]
+allow_instance = ["LivingRoomTV"]
+log_dir        = "./engagement-logs"   # used by `report` (planned)
+```
+
+```sh
+whodis --scope whodis-scope.toml spoof airplay-takeover.toml
+WHODIS_SCOPE=whodis-scope.toml whodis flood conflict "LivingRoomTV._airplay._tcp.local." --forever
+```
+
+`--allow` and `--allow-instance` on the command line stack on top of the file's lists.
