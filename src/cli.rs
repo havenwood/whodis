@@ -1,7 +1,8 @@
 //! CLI argument parsing and subcommand dispatch.
 
 use std::net::{Ipv4Addr, SocketAddr};
-use std::time::Duration;
+use std::path::PathBuf;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use clap::{CommandFactory, Parser, Subcommand};
@@ -165,9 +166,10 @@ pub enum Cmd {
 
     /// Capture mDNS traffic to a pcap file.
     Capture {
-        /// Output pcap file path.
+        /// Output pcap file path. Defaults to `mdns-{timestamp}.pcap` in the current
+        /// directory, or in `scope.log_dir` if set.
         #[arg(long, value_name = "FILE")]
-        pcap: std::path::PathBuf,
+        pcap: Option<std::path::PathBuf>,
 
         /// Capture window in seconds. 0 = until Ctrl-C.
         #[arg(short = 't', long, default_value_t = 0)]
@@ -222,8 +224,9 @@ pub enum Cmd {
 
     /// Sweep a CIDR block with ICMP echo to discover live IPv4 hosts. No root required.
     Sweep {
-        /// CIDR block to sweep (IPv4 only), e.g. `192.168.1.0/24`.
-        cidr: ipnet::Ipv4Net,
+        /// CIDR block to sweep (IPv4 only), e.g. `192.168.1.0/24`. Defaults to the /24 of the
+        /// primary non-loopback IPv4 interface (or the one named via `-i`).
+        cidr: Option<ipnet::Ipv4Net>,
 
         /// Per-probe timeout in milliseconds.
         #[arg(short = 't', long, default_value_t = 500)]
@@ -309,6 +312,36 @@ fn parse_positive_usize(s: &str) -> std::result::Result<usize, String> {
     Ok(value)
 }
 
+fn default_capture_filename() -> PathBuf {
+    let now = SystemTime::now();
+    let dur = now.duration_since(UNIX_EPOCH).unwrap_or_default();
+    let secs = dur.as_secs();
+    let when = time::OffsetDateTime::from_unix_timestamp(i64::try_from(secs).unwrap_or(0))
+        .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
+    let filename = format!(
+        "mdns-{:04}-{:02}-{:02}T{:02}-{:02}-{:02}Z.pcap",
+        when.year(),
+        u8::from(when.month()),
+        when.day(),
+        when.hour(),
+        when.minute(),
+        when.second()
+    );
+    PathBuf::from(filename)
+}
+
+fn resolve_capture_path(pcap: Option<PathBuf>, scope: Option<&crate::scope::Scope>) -> PathBuf {
+    let path = pcap.unwrap_or_else(default_capture_filename);
+    if path.is_absolute() {
+        return path;
+    }
+    let Some(dir) = scope.and_then(crate::scope::Scope::log_dir) else {
+        return path;
+    };
+    std::fs::create_dir_all(dir).ok();
+    dir.join(path)
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "run is a dispatch table over Cmd variants; splitting adds noise"
@@ -384,6 +417,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         }
         Cmd::Flood { kind } => run_flood(kind, scope).await?,
         Cmd::Capture { pcap, timeout } => {
+            let pcap = resolve_capture_path(pcap, scope.as_ref());
             let count = crate::capture::run(&pcap, timeout).await?;
             tracing::info!(packets = count, file = %pcap.display(), "capture complete");
         }
@@ -431,8 +465,17 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             no_oui,
             show_dead,
         } => {
+            let final_cidr = if let Some(c) = cidr {
+                c
+            } else {
+                let derived = derive_local_v4_subnet(&cli.interface).context(
+                    "no CIDR given and no local IPv4 interface found; pass a CIDR explicitly",
+                )?;
+                tracing::info!(cidr = %derived, "no CIDR given, sweeping local /24");
+                derived
+            };
             run_sweep(
-                renderer, scope, cidr, timeout, max, no_arp, no_oui, show_dead,
+                renderer, scope, final_cidr, timeout, max, no_arp, no_oui, show_dead,
             )
             .await?;
         }
@@ -775,6 +818,28 @@ async fn run_arp(
     Ok(())
 }
 
+fn derive_local_v4_subnet(iface_filter: &[String]) -> anyhow::Result<ipnet::Ipv4Net> {
+    let ifaces = get_if_addrs::get_if_addrs().context("listing interfaces")?;
+    for iface in ifaces {
+        if iface.is_loopback() {
+            continue;
+        }
+        if !iface_filter.is_empty() && !iface_filter.iter().any(|n| n == &iface.name) {
+            continue;
+        }
+        if let std::net::IpAddr::V4(addr) = iface.ip() {
+            let octets = addr.octets();
+            let net = ipnet::Ipv4Net::new(
+                std::net::Ipv4Addr::new(octets[0], octets[1], octets[2], 0),
+                24,
+            )
+            .context("building /24")?;
+            return Ok(net);
+        }
+    }
+    anyhow::bail!("no non-loopback IPv4 interface found")
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "all args map 1:1 to CLI flags; splitting into a struct would obscure the relationship"
@@ -994,6 +1059,54 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::panic,
+        reason = "test assertion intentionally panics on wrong variant"
+    )]
+    fn cli_parses_capture_without_pcap() {
+        let c = Cli::try_parse_from(["whodis", "capture"]).expect("parse");
+        match c.command {
+            Cmd::Capture { pcap, timeout } => {
+                assert!(pcap.is_none());
+                assert_eq!(timeout, 0);
+            }
+            other => panic!("expected Capture, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[allow(
+        clippy::panic,
+        reason = "test assertion intentionally panics on wrong variant"
+    )]
+    fn cli_parses_capture_with_pcap() {
+        let c = Cli::try_parse_from(["whodis", "capture", "--pcap", "snap.pcap"]).expect("parse");
+        match c.command {
+            Cmd::Capture { pcap, timeout } => {
+                assert_eq!(
+                    pcap.as_deref().map(|p| p.to_string_lossy().into_owned()),
+                    Some("snap.pcap".to_string())
+                );
+                assert_eq!(timeout, 0);
+            }
+            other => panic!("expected Capture, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn default_capture_filename_has_correct_format() {
+        let filename = default_capture_filename();
+        let name_str = filename
+            .file_name()
+            .expect("filename has a name")
+            .to_string_lossy();
+        assert!(name_str.starts_with("mdns-"));
+        assert!(name_str.ends_with(".pcap"));
+        assert!(name_str.contains('T'));
+        assert!(name_str.contains('Z'));
+    }
+
+    #[test]
     fn cli_rejects_zero_flood_rate() {
         let err = Cli::try_parse_from([
             "whodis",
@@ -1081,13 +1194,29 @@ mod tests {
                 no_oui,
                 show_dead,
             } => {
-                assert_eq!(cidr.to_string(), "192.168.1.0/24");
+                assert_eq!(
+                    cidr.map(|c| c.to_string()),
+                    Some("192.168.1.0/24".to_string())
+                );
                 assert_eq!(timeout, 500);
                 assert_eq!(max, 256);
                 assert!(!no_arp);
                 assert!(!no_oui);
                 assert!(!show_dead);
             }
+            other => panic!("expected Sweep, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[allow(
+        clippy::panic,
+        reason = "test assertion intentionally panics on wrong variant"
+    )]
+    fn cli_parses_sweep_without_cidr() {
+        let c = Cli::try_parse_from(["whodis", "sweep"]).expect("parse");
+        match c.command {
+            Cmd::Sweep { cidr, .. } => assert!(cidr.is_none()),
             other => panic!("expected Sweep, got {other:?}"),
         }
     }

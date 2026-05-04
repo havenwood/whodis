@@ -85,6 +85,7 @@ whodis arp --no-oui
 Active IPv4 host discovery via ICMP echo. Uses `SOCK_DGRAM + IPPROTO_ICMP`, which macOS allows unprivileged - no sudo required. After probing, the kernel's ARP cache is freshly populated; whodis reads it once to enrich live hosts with MAC and OUI vendor.
 
 ```
+whodis sweep                                # local /24 from primary interface
 whodis sweep 192.168.1.0/24
 whodis sweep 192.168.1.0/24 -t 500          # per-probe timeout in ms (default 500)
 whodis sweep 192.168.1.0/24 --max 64        # cap concurrent probes (default 256)
@@ -94,6 +95,8 @@ whodis sweep 192.168.1.0/24 --no-oui        # keep MAC, skip OUI vendor lookup
 whodis sweep 192.168.1.0/24 --show-dead     # also emit unreachable hosts
 ```
 
+With no CIDR, sweeps the /24 of the primary non-loopback IPv4 interface (or the one named via `-i`).
+
 Default `--max 256` guards against file descriptor exhaustion (macOS default `ulimit -n` is 256). IPv4 only in v1. Output is one record per host (`ip`, `alive`, `rtt_ms`, `mac`, `vendor`, `interface`); dead hosts omitted unless `--show-dead`. `--scope FILE` applies `allow_subnet` to skip IPs outside the engagement range.
 
 ## Capture
@@ -101,10 +104,13 @@ Default `--max 256` guards against file descriptor exhaustion (macOS default `ul
 LINKTYPE_RAW pcap with synthesized IPv4 / UDP wrappers. Wireshark and tshark read it directly. Default runs until Ctrl-C; `-t SECS` bounds the window.
 
 ```
+whodis capture                                # mdns-{timestamp}.pcap (in scope.log_dir if set)
 whodis capture --pcap engagement.pcap
 whodis capture --pcap engagement.pcap -t 60
 tshark -r engagement.pcap
 ```
+
+Omitting `--pcap` writes to `mdns-YYYY-MM-DDTHH-MM-SSZ.pcap` in the current directory, or inside scope's `log_dir` if configured. Pair with `--scope` to collect evidence alongside other engagement artifacts.
 
 ## Spoof
 
