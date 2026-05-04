@@ -14,7 +14,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, anyhow};
+use anyhow::Context;
 use ipnet::IpNet;
 use serde::Deserialize;
 
@@ -35,12 +35,6 @@ impl Scope {
         let raw = std::fs::read_to_string(path)
             .with_context(|| format!("reading scope file {}", path.display()))?;
         let scope: Self = toml::from_str(&raw).context("parsing scope file")?;
-        if scope.allow_subnet.is_empty() && scope.allow_instance.is_empty() {
-            return Err(anyhow!(
-                "scope file at {} declares neither allow_subnet nor allow_instance; refusing as misconfigured",
-                path.display()
-            ));
-        }
         Ok(scope)
     }
 
@@ -91,11 +85,14 @@ mod tests {
     }
 
     #[test]
-    fn rejects_empty_scope_via_load() {
+    fn loads_log_dir_only_scope() {
         let dir = tempdir_or_skip();
         let path = dir.join("scope.toml");
         std::fs::write(&path, "log_dir = \"./out\"\n").expect("write");
-        assert!(Scope::load(&path).is_err());
+        let scope = Scope::load(&path).expect("load");
+        assert_eq!(scope.log_dir(), Some(std::path::Path::new("./out")));
+        assert!(scope.allow_subnet.is_empty());
+        assert!(scope.allow_instance.is_empty());
     }
 
     #[test]
