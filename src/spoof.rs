@@ -345,7 +345,7 @@ impl Responder {
                     match r {
                         Ok(Some((n, src))) => {
                             let payload = buf.get(..n).unwrap_or(&[]);
-                            self.handle_query(payload, src).await;
+                            self.handle_packet(payload, src).await;
                         }
                         Ok(None) => {}
                         Err(e) => tracing::debug!(error = %e, "spoof rx error, continuing"),
@@ -355,11 +355,17 @@ impl Responder {
         }
     }
 
-    async fn handle_query(&self, payload: &[u8], src: std::net::SocketAddr) {
-        let msg = match Message::from_bytes(payload) {
-            Ok(m) if m.message_type() == MessageType::Query => m,
-            _ => return,
+    async fn handle_packet(&self, payload: &[u8], src: std::net::SocketAddr) {
+        let Ok(msg) = Message::from_bytes(payload) else {
+            return;
         };
+        match msg.message_type() {
+            MessageType::Query => self.handle_query(msg, src).await,
+            MessageType::Response => self.handle_response(&msg, src),
+        }
+    }
+
+    async fn handle_query(&self, msg: Message, src: std::net::SocketAddr) {
         if !self.auth.permits_addr(src.ip()) {
             tracing::debug!(%src, "blocked by allow-list");
             return;
@@ -387,6 +393,27 @@ impl Responder {
                     }
                 }
                 tracing::info!(query = %name, qtype = ?q.query_type(), %src, "spoofed");
+            }
+        }
+    }
+
+    fn handle_response(&self, msg: &Message, src: std::net::SocketAddr) {
+        if self.transport.is_local_addr(src.ip()) {
+            return;
+        }
+        if msg.answers().is_empty() {
+            return;
+        }
+        for r in msg.answers() {
+            let name = r.name().to_string();
+            let qtype = r.record_type();
+            if self.table.lookup_response(&name, qtype).is_some() {
+                tracing::warn!(
+                    %src,
+                    name = %name,
+                    qtype = ?qtype,
+                    "spoof conflict: another responder claims a name we own"
+                );
             }
         }
     }
@@ -558,5 +585,17 @@ mod tests {
                 .iter()
                 .any(|candidate| auth.permits_instance(candidate))
         );
+    }
+
+    #[test]
+    fn lookup_response_detects_owned_name() {
+        use hickory_proto::rr::rdata::A as ARData;
+        let t = AnswerTableBuilder::new()
+            .answer("our.local.", RecordType::A, RData::A(ARData(Ipv4Addr::new(1, 2, 3, 4))))
+            .expect("answer")
+            .build();
+        assert!(t.lookup_response("our.local.", RecordType::A).is_some());
+        assert!(t.lookup_response("OUR.LOCAL", RecordType::A).is_some());
+        assert!(t.lookup_response("not-ours.local.", RecordType::A).is_none());
     }
 }

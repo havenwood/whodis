@@ -124,6 +124,8 @@ data = "10.0.5.42"
 
 Supported qtypes: `A`, `AAAA`, `PTR`, `SRV`, `TXT`. `PTR` responses bundle related `SRV` / `TXT` / `A` / `AAAA` as additionals so one client query fully hydrates the instance.
 
+The responder also watches for conflicting authoritative records on the LAN -- when something else announces a name we own, it logs `spoof conflict` at warn level so you know the legitimate device is defending its name.
+
 ## Clone
 
 Capture an instance that is actually on the LAN and emit a TOML answer table that mimics its PTR / SRV / TXT / A / AAAA records. The output replays through `whodis spoof` for engagement-grade impersonation. Pair with `--relay` to MITM the real device.

@@ -63,6 +63,17 @@ impl Transport {
         self.v4.clone()
     }
 
+    pub(crate) fn is_local_addr(&self, ip: std::net::IpAddr) -> bool {
+        match ip {
+            std::net::IpAddr::V4(v4) => self.v4_ifaces.contains(&v4),
+            // We track v6 by interface index, not address. For v6 conflict detection
+            // a local-source filter is best-effort. Return false to be safe (will
+            // log our own v6 announces as conflicts in the rare case we send any -
+            // accept that v1 limitation).
+            std::net::IpAddr::V6(_) => false,
+        }
+    }
+
     pub(crate) fn v6(&self) -> Option<Arc<UdpSocket>> {
         self.v6.clone()
     }
