@@ -62,15 +62,35 @@ impl Transport {
     pub(crate) async fn send_query(&self, payload: &[u8], dest: Destination) -> Result<()> {
         match dest {
             Destination::Multicast => {
+                let mut sent = false;
+                let mut last_err: Option<std::io::Error> = None;
                 if let Some(s) = &self.v4 {
                     let addr = SocketAddr::new(IpAddr::V4(self.mode.group_v4()), self.mode.port());
-                    s.send_to(payload, addr).await?;
+                    match s.send_to(payload, addr).await {
+                        Ok(_) => sent = true,
+                        Err(e) => {
+                            tracing::debug!(error = %e, "v4 multicast send failed");
+                            last_err = Some(e);
+                        }
+                    }
                 }
                 if let Some(s) = &self.v6 {
                     let addr = SocketAddr::new(IpAddr::V6(self.mode.group_v6()), self.mode.port());
-                    s.send_to(payload, addr).await?;
+                    match s.send_to(payload, addr).await {
+                        Ok(_) => sent = true,
+                        Err(e) => {
+                            tracing::debug!(error = %e, "v6 multicast send failed");
+                            last_err = Some(e);
+                        }
+                    }
                 }
-                Ok(())
+                if sent {
+                    Ok(())
+                } else {
+                    Err(last_err
+                        .unwrap_or_else(|| std::io::Error::other("no multicast socket"))
+                        .into())
+                }
             }
             Destination::Unicast(addr) => {
                 let sock = match addr {
@@ -123,20 +143,25 @@ fn unsafe_if_nametoindex(name: &std::ffi::CStr) -> u32 {
 
 #[allow(dead_code, reason = "consumed by browse/spoof modules in later tasks")]
 fn build_v4_socket(mode: Mode, ifaces: &[Ipv4Addr]) -> Result<Option<UdpSocket>> {
-    if ifaces.is_empty() && mode.binds_port() {
+    let Some(first) = ifaces.first() else {
         return Ok(None);
-    }
+    };
     let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(SockProtocol::UDP))?;
     sock.set_reuse_address(true)?;
     sock.set_reuse_port(true)?;
     sock.set_multicast_loop_v4(true)?;
     sock.set_nonblocking(true)?;
+    if let Err(e) = sock.set_multicast_if_v4(first) {
+        tracing::debug!(error = %e, iface = %first, "set_multicast_if_v4 failed, using kernel default");
+    }
 
     if mode.binds_port() {
         let bind: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), mode.port());
         sock.bind(&bind.into())?;
         for iface in ifaces {
-            sock.join_multicast_v4(&mode.group_v4(), iface)?;
+            if let Err(e) = sock.join_multicast_v4(&mode.group_v4(), iface) {
+                tracing::debug!(error = %e, iface = %iface, "join_multicast_v4 failed, skipping");
+            }
         }
     } else {
         let bind: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
@@ -149,21 +174,26 @@ fn build_v4_socket(mode: Mode, ifaces: &[Ipv4Addr]) -> Result<Option<UdpSocket>>
 
 #[allow(dead_code, reason = "consumed by browse/spoof modules in later tasks")]
 fn build_v6_socket(mode: Mode, ifaces: &[u32]) -> Result<Option<UdpSocket>> {
-    if ifaces.is_empty() && mode.binds_port() {
+    let Some(first) = ifaces.first().copied() else {
         return Ok(None);
-    }
+    };
     let sock = Socket::new(Domain::IPV6, Type::DGRAM, Some(SockProtocol::UDP))?;
     sock.set_only_v6(true)?;
     sock.set_reuse_address(true)?;
     sock.set_reuse_port(true)?;
     sock.set_multicast_loop_v6(true)?;
     sock.set_nonblocking(true)?;
+    if let Err(e) = sock.set_multicast_if_v6(first) {
+        tracing::debug!(error = %e, iface_idx = first, "set_multicast_if_v6 failed, using kernel default");
+    }
 
     if mode.binds_port() {
         let bind: SocketAddr = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), mode.port());
         sock.bind(&bind.into())?;
         for idx in ifaces {
-            sock.join_multicast_v6(&mode.group_v6(), *idx)?;
+            if let Err(e) = sock.join_multicast_v6(&mode.group_v6(), *idx) {
+                tracing::debug!(error = %e, iface_idx = *idx, "join_multicast_v6 failed, skipping");
+            }
         }
     } else {
         let bind: SocketAddr = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0);

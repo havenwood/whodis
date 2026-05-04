@@ -119,7 +119,10 @@ pub async fn discover_service_types(opts: &ProbeOptions) -> Result<Vec<ServiceTy
         .map(|st| {
             let fqdn = st.fqdn();
             let instance_count = counts.get(&fqdn).map_or(0, HashSet::len);
-            ServiceTypeSummary { fqdn, instance_count }
+            ServiceTypeSummary {
+                fqdn,
+                instance_count,
+            }
         })
         .collect())
 }

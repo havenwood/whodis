@@ -51,7 +51,10 @@ pub(crate) fn emit_browse_event(
     fp: Option<&Fingerprint>,
 ) -> io::Result<()> {
     match renderer {
-        Renderer::Jsonl => emit_jsonl(&BrowseRecord { event, fingerprint: fp }),
+        Renderer::Jsonl => emit_jsonl(&BrowseRecord {
+            event,
+            fingerprint: fp,
+        }),
         Renderer::Pretty(c) => emit_browse_pretty(c, event, fp),
     }
 }
@@ -79,8 +82,16 @@ pub(crate) fn emit_service_type_summaries(
             let mut out = io::stdout().lock();
             let width = summaries.iter().map(|s| s.fqdn.len()).max().unwrap_or(0);
             for s in summaries {
-                let plural = if s.instance_count == 1 { "instance" } else { "instances" };
-                writeln!(out, "  {:<width$}   {} {}", s.fqdn, s.instance_count, plural)?;
+                let plural = if s.instance_count == 1 {
+                    "instance"
+                } else {
+                    "instances"
+                };
+                writeln!(
+                    out,
+                    "  {:<width$}   {} {}",
+                    s.fqdn, s.instance_count, plural
+                )?;
             }
             Ok(())
         }
@@ -102,11 +113,7 @@ pub(crate) fn emit_instance(
     }
 }
 
-fn emit_browse_pretty(
-    color: ColorMode,
-    event: &Event,
-    fp: Option<&Fingerprint>,
-) -> io::Result<()> {
+fn emit_browse_pretty(color: ColorMode, event: &Event, fp: Option<&Fingerprint>) -> io::Result<()> {
     let on = color.enabled();
     let mut out = io::stdout().lock();
     let now = now_hms();

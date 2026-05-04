@@ -198,11 +198,7 @@ fn init_tracing(quiet: bool, verbose: u8) {
         .ok();
 }
 
-async fn run_browse(
-    renderer: Renderer,
-    timeout: u64,
-    fingerprint: bool,
-) -> anyhow::Result<()> {
+async fn run_browse(renderer: Renderer, timeout: u64, fingerprint: bool) -> anyhow::Result<()> {
     let browser = Browser::new(Mode::Listen).context("starting browser")?;
     let cancel = browser.cancel_token();
     let stream = browser.run();
@@ -400,7 +396,9 @@ mod tests {
     fn cli_parses_probe_with_service() {
         let c = Cli::try_parse_from(["whodis", "probe", "_airplay._tcp.local."]).expect("parse");
         match c.command {
-            Cmd::Probe { service, .. } => assert_eq!(service.as_deref(), Some("_airplay._tcp.local.")),
+            Cmd::Probe { service, .. } => {
+                assert_eq!(service.as_deref(), Some("_airplay._tcp.local."));
+            }
             other => panic!("expected Probe, got {other:?}"),
         }
     }
