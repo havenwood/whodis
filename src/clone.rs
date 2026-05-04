@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use hickory_proto::op::{Message, MessageType, OpCode, Query};
 use hickory_proto::rr::rdata::{A, AAAA};
-use hickory_proto::rr::{DNSClass, Name, RData, Record, RecordType};
+use hickory_proto::rr::{DNSClass, RData, Record, RecordType};
 use hickory_proto::serialize::binary::{BinDecodable, BinEncodable};
 
 use crate::error::{Error, Result};
@@ -76,12 +76,11 @@ impl ClonedInstance {
             let _r = writeln!(s, "[[answer]]");
             let _r = writeln!(s, "name = {}", toml_quote(&self.instance_fqdn));
             let _r = writeln!(s, "qtype = \"TXT\"");
-            let parts = self
-                .txt
-                .iter()
-                .map(|t| toml_quote(t))
-                .collect::<Vec<_>>()
-                .join(", ");
+            let mut quoted_txt = Vec::with_capacity(self.txt.len());
+            for t in &self.txt {
+                quoted_txt.push(toml_quote(t));
+            }
+            let parts = quoted_txt.join(", ");
             let _r = writeln!(s, "txt = [{parts}]");
             let _r = writeln!(s);
         }
@@ -126,7 +125,10 @@ fn toml_quote(s: &str) -> String {
     out
 }
 
-pub(crate) async fn clone_instance(instance_fqdn: &str, timeout: Duration) -> Result<ClonedInstance> {
+pub(crate) async fn clone_instance(
+    instance_fqdn: &str,
+    timeout: Duration,
+) -> Result<ClonedInstance> {
     let parsed = parse_instance(instance_fqdn)?;
     // Listen mode binds 5353 with SO_REUSEPORT so we receive both multicast responses from the
     // mDNS group and unicast responses the target sends back to port 5353.
@@ -202,12 +204,7 @@ fn parse_instance(fqdn: &str) -> Result<Parsed> {
 }
 
 fn push_query(msg: &mut Message, name: &str, qtype: RecordType) -> Result<()> {
-    // Name::from_utf8 rejects labels containing spaces (common in mDNS instance names such as
-    // "Living Room AppleTV._airplay._tcp.local."). Build via from_labels so any byte sequence is
-    // accepted, which is what mDNS allows per RFC 6762.
-    let trimmed = name.trim_end_matches('.');
-    let labels: Vec<&[u8]> = trimmed.split('.').map(str::as_bytes).collect();
-    let n = Name::from_labels(labels).map_err(|_| Error::InvalidServiceType(name.to_string()))?;
+    let n = crate::name_util::lax_from_str(name)?;
     let mut q = Query::query(n, qtype);
     q.set_query_class(DNSClass::IN);
     msg.add_query(q);
@@ -221,8 +218,7 @@ async fn collect_records(
 ) -> Result<Vec<Record>> {
     let bytes = msg.to_bytes()?;
     transport.send_query(&bytes, Destination::Multicast).await?;
-    let mut buf = vec![0u8; 9000];
-    let mut records: Vec<Record> = Vec::new();
+    let mut records: Vec<Record> = Vec::with_capacity(msg.queries().len() * 4);
     let deadline = tokio::time::Instant::now() + timeout;
 
     loop {
@@ -230,10 +226,9 @@ async fn collect_records(
         if remaining.is_zero() {
             break;
         }
-        let recv_result = tokio::time::timeout(remaining, recv_any(transport, &mut buf)).await;
-        match recv_result {
-            Ok(Ok(n)) => {
-                if let Ok(parsed) = Message::from_bytes(buf.get(..n).unwrap_or(&[])) {
+        match tokio::time::timeout(remaining, transport.recv_packet()).await {
+            Ok(Ok(payload)) => {
+                if let Ok(parsed) = Message::from_bytes(&payload) {
                     for r in parsed.answers() {
                         records.push(r.clone());
                     }
@@ -247,18 +242,6 @@ async fn collect_records(
         }
     }
     Ok(records)
-}
-
-async fn recv_any(transport: &Transport, buf: &mut [u8]) -> std::io::Result<usize> {
-    if let Some(s) = transport.v4() {
-        let (n, _addr) = s.recv_from(buf).await?;
-        return Ok(n);
-    }
-    if let Some(s) = transport.v6() {
-        let (n, _addr) = s.recv_from(buf).await?;
-        return Ok(n);
-    }
-    Err(std::io::Error::other("no socket"))
 }
 
 fn absorb_record(out: &mut ClonedInstance, r: &Record, instance_fqdn: &str) {
@@ -292,14 +275,12 @@ fn absorb_record(out: &mut ClonedInstance, r: &Record, instance_fqdn: &str) {
             }
         }
         Some(RData::A(A(ip)))
-            if host_match.as_deref() == Some(&owner_norm)
-                && !out.addrs_v4.contains(ip) =>
+            if host_match.as_deref() == Some(&owner_norm) && !out.addrs_v4.contains(ip) =>
         {
             out.addrs_v4.push(*ip);
         }
         Some(RData::AAAA(AAAA(ip)))
-            if host_match.as_deref() == Some(&owner_norm)
-                && !out.addrs_v6.contains(ip) =>
+            if host_match.as_deref() == Some(&owner_norm) && !out.addrs_v6.contains(ip) =>
         {
             out.addrs_v6.push(*ip);
         }

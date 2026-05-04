@@ -28,7 +28,8 @@ impl Authorization {
 
     #[must_use]
     pub fn allow_instance(mut self, name: impl Into<String>) -> Self {
-        self.allow_instances.push(name.into());
+        self.allow_instances
+            .push(normalize_instance_id(&name.into()));
         self
     }
 
@@ -39,7 +40,13 @@ impl Authorization {
 
     #[must_use]
     pub fn permits_instance(&self, name: &str) -> bool {
-        self.allow_instances.is_empty() || self.allow_instances.iter().any(|n| n == name)
+        if self.allow_instances.is_empty() {
+            return true;
+        }
+        let candidates = instance_candidates(name);
+        self.allow_instances
+            .iter()
+            .any(|allowed| candidates.iter().any(|candidate| candidate == allowed))
     }
 
     #[must_use]
@@ -62,6 +69,22 @@ impl Authorization {
              pass --allow CIDR or --allow-instance NAME to scope it."
         );
     }
+}
+
+fn normalize_instance_id(name: &str) -> String {
+    name.trim_end_matches('.').to_ascii_lowercase()
+}
+
+fn instance_candidates(name: &str) -> Vec<String> {
+    let full = normalize_instance_id(name);
+    let mut candidates = Vec::with_capacity(2);
+    candidates.push(full.clone());
+    if let Some(leftmost) = full.split('.').next() {
+        if !leftmost.is_empty() && leftmost != full {
+            candidates.push(leftmost.to_string());
+        }
+    }
+    candidates
 }
 
 #[cfg(test)]
@@ -88,6 +111,15 @@ mod tests {
     fn instance_allow_only_matches_listed() {
         let a = Authorization::new().allow_instance("LivingRoom AppleTV");
         assert!(a.permits_instance("LivingRoom AppleTV"));
+        assert!(a.permits_instance("LivingRoom AppleTV._airplay._tcp.local."));
+        assert!(a.permits_instance("livingroom appletv._airplay._tcp.local."));
         assert!(!a.permits_instance("Bedroom AppleTV"));
+    }
+
+    #[test]
+    fn full_fqdn_allow_matches_full_fqdn_only() {
+        let a = Authorization::new().allow_instance("Living._airplay._tcp.local.");
+        assert!(a.permits_instance("Living._airplay._tcp.local."));
+        assert!(!a.permits_instance("Living._raop._tcp.local."));
     }
 }

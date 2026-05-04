@@ -7,6 +7,7 @@ use serde::Serialize;
 
 use crate::browse::Event;
 use crate::probe::{HostEnumeration, ServiceTypeSummary};
+use crate::types::HostAnswer;
 use crate::types::{Device, Fingerprint, Instance};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,7 +40,10 @@ pub(crate) enum Renderer {
 }
 
 /// Write a raw string to stdout. Used by subcommands that produce non-JSONL output (e.g. clone).
-#[allow(clippy::print_stdout, reason = "output.rs is the designated CLI stdout sink")]
+#[allow(
+    clippy::print_stdout,
+    reason = "output.rs is the designated CLI stdout sink"
+)]
 pub(crate) fn emit_raw(s: &str) -> io::Result<()> {
     let mut out = io::stdout().lock();
     out.write_all(s.as_bytes())?;
@@ -121,6 +125,29 @@ pub(crate) fn emit_instance(
     }
 }
 
+pub(crate) fn emit_host_answers(renderer: Renderer, answers: &[HostAnswer]) -> io::Result<()> {
+    match renderer {
+        Renderer::Jsonl => {
+            for a in answers {
+                emit_jsonl(a)?;
+            }
+            Ok(())
+        }
+        Renderer::Pretty(_) => {
+            let mut out = io::stdout().lock();
+            for a in answers {
+                let mut rendered_addrs = Vec::with_capacity(a.addrs.len());
+                for addr in &a.addrs {
+                    rendered_addrs.push(addr.to_string());
+                }
+                let addrs = rendered_addrs.join(", ");
+                writeln!(out, "{}  {}", a.host, addrs)?;
+            }
+            Ok(())
+        }
+    }
+}
+
 fn emit_browse_pretty(color: ColorMode, event: &Event, fp: Option<&Fingerprint>) -> io::Result<()> {
     let on = color.enabled();
     let mut out = io::stdout().lock();
@@ -185,16 +212,13 @@ fn emit_instance_pretty(
     writeln!(out, "{}", paint(on, &instance.fqdn(), BOLD))?;
     writeln!(out, "    host        {}", instance.host)?;
     writeln!(out, "    port        {}", instance.port)?;
-    let txt = instance
-        .txt
-        .iter()
-        .map(|(k, v)| {
-            let value =
-                std::str::from_utf8(v).map_or_else(|_| format!("0x{}", hex_lower(v)), String::from);
-            format!("{k}={value}")
-        })
-        .collect::<Vec<_>>()
-        .join("  ");
+    let mut rendered_txt = Vec::with_capacity(instance.txt.len());
+    for (k, v) in &instance.txt {
+        let value =
+            std::str::from_utf8(v).map_or_else(|_| format!("0x{}", hex_lower(v)), String::from);
+        rendered_txt.push(format!("{k}={value}"));
+    }
+    let txt = rendered_txt.join("  ");
     writeln!(out, "    txt         {txt}")?;
     if let Some(fp) = fp {
         let summary = fp.os_hint.as_ref().map_or_else(

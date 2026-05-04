@@ -7,20 +7,19 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 
-use socket2::{Domain, Protocol as SockProtocol, Socket, Type};
+use socket2::{Domain, Protocol as SockProtocol, SockRef, Socket, Type};
 use tokio::net::UdpSocket;
 
 use crate::error::Result;
 use crate::mode::Mode;
 
-#[allow(dead_code, reason = "consumed by browse/spoof modules in later tasks")]
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Destination {
     Multicast,
+    #[allow(dead_code, reason = "reserved for directed mDNS responses")]
     Unicast(SocketAddr),
 }
 
-#[allow(dead_code, reason = "consumed by browse/spoof modules in later tasks")]
 #[derive(Debug)]
 pub(crate) struct Transport {
     pub(crate) mode: Mode,
@@ -31,7 +30,6 @@ pub(crate) struct Transport {
 }
 
 impl Transport {
-    #[allow(dead_code, reason = "consumed by browse/spoof modules in later tasks")]
     pub(crate) fn build(mode: Mode) -> Result<Self> {
         let (v4_ifaces, v6_ifaces) = list_interfaces()?;
         let v4 = build_v4_socket(mode, &v4_ifaces)?.map(Arc::new);
@@ -48,17 +46,14 @@ impl Transport {
         })
     }
 
-    #[allow(dead_code, reason = "consumed by browse/spoof modules in later tasks")]
     pub(crate) fn v4(&self) -> Option<Arc<UdpSocket>> {
         self.v4.clone()
     }
 
-    #[allow(dead_code, reason = "consumed by browse/spoof modules in later tasks")]
     pub(crate) fn v6(&self) -> Option<Arc<UdpSocket>> {
         self.v6.clone()
     }
 
-    #[allow(dead_code, reason = "consumed by browse/spoof modules in later tasks")]
     pub(crate) async fn send_query(&self, payload: &[u8], dest: Destination) -> Result<()> {
         match dest {
             Destination::Multicast => {
@@ -66,21 +61,33 @@ impl Transport {
                 let mut last_err: Option<std::io::Error> = None;
                 if let Some(s) = &self.v4 {
                     let addr = SocketAddr::new(IpAddr::V4(self.mode.group_v4()), self.mode.port());
-                    match s.send_to(payload, addr).await {
-                        Ok(_) => sent = true,
-                        Err(e) => {
-                            tracing::debug!(error = %e, "v4 multicast send failed");
-                            last_err = Some(e);
+                    for iface in &self.v4_ifaces {
+                        let sock_ref = SockRef::from(s.as_ref());
+                        if let Err(e) = sock_ref.set_multicast_if_v4(iface) {
+                            tracing::debug!(error = %e, iface = %iface, "set_multicast_if_v4 failed before send");
+                        }
+                        match s.send_to(payload, addr).await {
+                            Ok(_) => sent = true,
+                            Err(e) => {
+                                tracing::debug!(error = %e, iface = %iface, "v4 multicast send failed");
+                                last_err = Some(e);
+                            }
                         }
                     }
                 }
                 if let Some(s) = &self.v6 {
                     let addr = SocketAddr::new(IpAddr::V6(self.mode.group_v6()), self.mode.port());
-                    match s.send_to(payload, addr).await {
-                        Ok(_) => sent = true,
-                        Err(e) => {
-                            tracing::debug!(error = %e, "v6 multicast send failed");
-                            last_err = Some(e);
+                    for iface in &self.v6_ifaces {
+                        let sock_ref = SockRef::from(s.as_ref());
+                        if let Err(e) = sock_ref.set_multicast_if_v6(*iface) {
+                            tracing::debug!(error = %e, iface_idx = *iface, "set_multicast_if_v6 failed before send");
+                        }
+                        match s.send_to(payload, addr).await {
+                            Ok(_) => sent = true,
+                            Err(e) => {
+                                tracing::debug!(error = %e, iface_idx = *iface, "v6 multicast send failed");
+                                last_err = Some(e);
+                            }
                         }
                     }
                 }
@@ -104,13 +111,45 @@ impl Transport {
             }
         }
     }
+
+    /// Wait for one inbound packet on whichever stack delivers first. Allocates a fresh
+    /// buffer per call. Returns the truncated payload bytes.
+    pub(crate) async fn recv_packet(&self) -> std::io::Result<Vec<u8>> {
+        let v4 = self.v4.clone();
+        let v6 = self.v6.clone();
+        match (v4, v6) {
+            (Some(s4), Some(s6)) => {
+                let mut buf4 = vec![0u8; 9000];
+                let mut buf6 = vec![0u8; 9000];
+                tokio::select! {
+                    r = s4.recv_from(&mut buf4) => {
+                        let (n, _) = r?;
+                        buf4.truncate(n);
+                        Ok(buf4)
+                    }
+                    r = s6.recv_from(&mut buf6) => {
+                        let (n, _) = r?;
+                        buf6.truncate(n);
+                        Ok(buf6)
+                    }
+                }
+            }
+            (Some(s), None) | (None, Some(s)) => {
+                let mut buf = vec![0u8; 9000];
+                let (n, _) = s.recv_from(&mut buf).await?;
+                buf.truncate(n);
+                Ok(buf)
+            }
+            (None, None) => Err(std::io::Error::other("no socket")),
+        }
+    }
 }
 
-#[allow(dead_code, reason = "consumed by browse/spoof modules in later tasks")]
 fn list_interfaces() -> Result<(Vec<Ipv4Addr>, Vec<u32>)> {
-    let mut v4 = Vec::new();
-    let mut v6 = Vec::new();
-    for iface in get_if_addrs::get_if_addrs()? {
+    let ifaces = get_if_addrs::get_if_addrs()?;
+    let mut v4 = Vec::with_capacity(ifaces.len());
+    let mut v6 = Vec::with_capacity(ifaces.len());
+    for iface in ifaces {
         if iface.is_loopback() {
             continue;
         }
@@ -127,21 +166,10 @@ fn list_interfaces() -> Result<(Vec<Ipv4Addr>, Vec<u32>)> {
     Ok((v4, v6))
 }
 
-#[allow(dead_code, reason = "consumed by browse/spoof modules in later tasks")]
 fn interface_index_for_v6(name: &str) -> Option<u32> {
-    let cstr = std::ffi::CString::new(name).ok()?;
-    let idx = unsafe_if_nametoindex(&cstr);
-    (idx > 0).then_some(idx)
+    nix::net::if_::if_nametoindex(name).ok()
 }
 
-#[allow(unsafe_code, reason = "single libc call to map iface name to index")]
-fn unsafe_if_nametoindex(name: &std::ffi::CStr) -> u32 {
-    // Safety: name is a valid NUL-terminated C string. libc::if_nametoindex returns 0 on error,
-    // which we handle in the caller.
-    unsafe { libc::if_nametoindex(name.as_ptr()) }
-}
-
-#[allow(dead_code, reason = "consumed by browse/spoof modules in later tasks")]
 fn build_v4_socket(mode: Mode, ifaces: &[Ipv4Addr]) -> Result<Option<UdpSocket>> {
     let Some(first) = ifaces.first() else {
         return Ok(None);
@@ -172,7 +200,6 @@ fn build_v4_socket(mode: Mode, ifaces: &[Ipv4Addr]) -> Result<Option<UdpSocket>>
     Ok(Some(UdpSocket::from_std(std_sock)?))
 }
 
-#[allow(dead_code, reason = "consumed by browse/spoof modules in later tasks")]
 fn build_v6_socket(mode: Mode, ifaces: &[u32]) -> Result<Option<UdpSocket>> {
     let Some(first) = ifaces.first().copied() else {
         return Ok(None);

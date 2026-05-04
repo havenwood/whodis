@@ -10,6 +10,7 @@ mod cli;
 mod clone;
 mod error;
 mod mode;
+mod name_util;
 mod output;
 mod relay;
 mod report;

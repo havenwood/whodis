@@ -51,20 +51,14 @@ impl AnswerTableBuilder {
         rdata: RData,
     ) -> Result<Self> {
         let name_str = name.into();
-        let rec_name =
-            Name::from_utf8(&name_str).map_err(|_| Error::InvalidServiceType(name_str.clone()))?;
+        let rec_name = crate::name_util::lax_from_str(&name_str)?;
         self.push_entry(name_str, rec_name, qtype, rdata);
         Ok(self)
     }
 
     /// Like [`answer`] but accepts a pre-built [`Name`] for labels that contain characters
     /// rejected by the STD3 validator (e.g. `@` in RAOP instance names).
-    pub fn answer_name(
-        mut self,
-        rec_name: Name,
-        qtype: RecordType,
-        rdata: RData,
-    ) -> Result<Self> {
+    pub fn answer_name(mut self, rec_name: Name, qtype: RecordType, rdata: RData) -> Result<Self> {
         let name_str = rec_name.to_string();
         self.push_entry(name_str, rec_name, qtype, rdata);
         Ok(self)
@@ -92,7 +86,8 @@ impl AnswerTableBuilder {
     pub fn build(self) -> AnswerTable {
         let entries = self.entries;
         // Reverse-lookup map for chasing additionals (PTR -> SRV/TXT, SRV -> A/AAAA).
-        let mut by_key: HashMap<(String, RecordType), Vec<Record>> = HashMap::new();
+        let mut by_key: HashMap<(String, RecordType), Vec<Record>> =
+            HashMap::with_capacity(entries.len());
         for e in &entries {
             by_key
                 .entry((normalize(&e.name), e.qtype))
@@ -100,7 +95,24 @@ impl AnswerTableBuilder {
                 .extend(e.records.iter().cloned());
         }
 
-        let mut map: HashMap<(String, RecordType), Vec<u8>> = HashMap::new();
+        let mut srv_target_to_instances: HashMap<String, Vec<String>> =
+            HashMap::with_capacity(entries.len());
+        for e in &entries {
+            if e.qtype != RecordType::SRV {
+                continue;
+            }
+            for r in &e.records {
+                if let Some(RData::SRV(srv)) = r.data() {
+                    srv_target_to_instances
+                        .entry(normalize(&srv.target().to_string()))
+                        .or_default()
+                        .push(r.name().to_string());
+                }
+            }
+        }
+
+        let mut map: HashMap<(String, RecordType), ResponseEntry> =
+            HashMap::with_capacity(entries.len());
         for e in &entries {
             let mut msg = Message::new();
             msg.set_message_type(MessageType::Response)
@@ -111,11 +123,15 @@ impl AnswerTableBuilder {
             }
             attach_additionals(&mut msg, &e.records, e.qtype, &by_key);
             if let Ok(bytes) = msg.to_bytes() {
-                map.insert((normalize(&e.name), e.qtype), bytes);
+                let auth_names = auth_names_for_entry(e, &srv_target_to_instances);
+                map.insert(
+                    (normalize(&e.name), e.qtype),
+                    ResponseEntry { bytes, auth_names },
+                );
             }
         }
 
-        let mut srv_ports: Vec<u16> = Vec::new();
+        let mut srv_ports: Vec<u16> = Vec::with_capacity(entries.len());
         for e in &entries {
             if e.qtype == RecordType::SRV {
                 for r in &e.records {
@@ -132,13 +148,38 @@ impl AnswerTableBuilder {
     }
 }
 
+fn auth_names_for_entry(
+    entry: &AnswerEntry,
+    srv_target_to_instances: &HashMap<String, Vec<String>>,
+) -> Vec<String> {
+    let mut names = Vec::with_capacity(entry.records.len() * 3 + 1);
+    names.push(entry.name.clone());
+    for r in &entry.records {
+        names.push(r.name().to_string());
+        match r.data() {
+            Some(RData::PTR(ptr)) => names.push(ptr.0.to_string()),
+            Some(RData::SRV(srv)) => names.push(srv.target().to_string()),
+            _ => {}
+        }
+        if matches!(entry.qtype, RecordType::A | RecordType::AAAA) {
+            if let Some(instances) = srv_target_to_instances.get(&normalize(&r.name().to_string()))
+            {
+                names.extend(instances.iter().cloned());
+            }
+        }
+    }
+    names.sort_by_key(|name| normalize(name));
+    names.dedup_by(|a, b| normalize(a) == normalize(b));
+    names
+}
+
 fn attach_additionals(
     msg: &mut Message,
     answers: &[Record],
     qtype: RecordType,
     by_key: &HashMap<(String, RecordType), Vec<Record>>,
 ) {
-    let mut hosts_to_resolve: Vec<String> = Vec::new();
+    let mut hosts_to_resolve: Vec<String> = Vec::with_capacity(answers.len());
     match qtype {
         RecordType::PTR => {
             for r in answers {
@@ -187,14 +228,26 @@ fn push_records(
 
 #[derive(Debug, Clone, Default)]
 pub struct AnswerTable {
-    map: HashMap<(String, RecordType), Vec<u8>>,
+    map: HashMap<(String, RecordType), ResponseEntry>,
     srv_ports: Vec<u16>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ResponseEntry {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) auth_names: Vec<String>,
 }
 
 impl AnswerTable {
     #[must_use]
     pub fn lookup(&self, name: &str, qtype: RecordType) -> Option<&[u8]> {
-        self.map.get(&(normalize(name), qtype)).map(Vec::as_slice)
+        self.lookup_response(name, qtype)
+            .map(|response| response.bytes.as_slice())
+    }
+
+    #[must_use]
+    pub(crate) fn lookup_response(&self, name: &str, qtype: RecordType) -> Option<&ResponseEntry> {
+        self.map.get(&(normalize(name), qtype))
     }
 
     #[must_use]
@@ -280,14 +333,18 @@ impl Responder {
         }
         for q in msg.queries() {
             let name = q.name().to_string();
-            if !self.auth.permits_instance(&strip_dot(&name)) {
-                continue;
-            }
-            if let Some(bytes) = self.table.lookup(&name, q.query_type()) {
+            if let Some(response) = self.table.lookup_response(&name, q.query_type()) {
+                if !response
+                    .auth_names
+                    .iter()
+                    .any(|candidate| self.auth.permits_instance(candidate))
+                {
+                    continue;
+                }
                 for i in 0..self.burst {
                     if let Err(e) = self
                         .transport
-                        .send_query(bytes, Destination::Multicast)
+                        .send_query(&response.bytes, Destination::Multicast)
                         .await
                     {
                         tracing::debug!(error = %e, "send failed");
@@ -329,10 +386,6 @@ async fn recv_one(
         (None, Some(s6)) => s6.recv_from(buf).await.map(|(n, a)| Some((n, a))),
         (None, None) => Ok(None),
     }
-}
-
-fn strip_dot(s: &str) -> String {
-    s.trim_end_matches('.').to_string()
 }
 
 #[cfg(test)]
@@ -377,5 +430,30 @@ mod tests {
             .build();
         assert!(t.lookup("spoofed.local.", RecordType::A).is_some());
         assert!(t.lookup("SPOOFED.LOCAL", RecordType::A).is_some());
+    }
+
+    #[test]
+    fn ptr_response_authorizes_against_target_instance() {
+        let instance = "LivingRoom._airplay._tcp.local.";
+        let t = AnswerTableBuilder::new()
+            .answer(
+                "_airplay._tcp.local.",
+                RecordType::PTR,
+                RData::PTR(hickory_proto::rr::rdata::PTR(
+                    Name::from_utf8(instance).expect("name"),
+                )),
+            )
+            .expect("answer")
+            .build();
+        let response = t
+            .lookup_response("_airplay._tcp.local.", RecordType::PTR)
+            .expect("response");
+        let auth = Authorization::new().allow_instance("LivingRoom");
+        assert!(
+            response
+                .auth_names
+                .iter()
+                .any(|candidate| auth.permits_instance(candidate))
+        );
     }
 }

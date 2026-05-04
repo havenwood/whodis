@@ -227,10 +227,7 @@ mod tests {
             buf.get(0..4),
             Some(0xa1b2_c3d4_u32.to_le_bytes().as_slice())
         );
-        assert_eq!(
-            buf.get(20..24),
-            Some(LINKTYPE_RAW.to_le_bytes().as_slice())
-        );
+        assert_eq!(buf.get(20..24), Some(LINKTYPE_RAW.to_le_bytes().as_slice()));
     }
 
     #[test]
@@ -267,5 +264,4 @@ mod tests {
         // 16-byte pcap record header + 20 IPv4 + 8 UDP + payload
         assert_eq!(buf.len(), 16 + 20 + 8 + payload.len());
     }
-
 }

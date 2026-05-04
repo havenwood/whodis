@@ -11,7 +11,7 @@ use hickory_proto::rr::{DNSClass, Name, RData, Record, RecordType};
 use hickory_proto::serialize::binary::{BinDecodable, BinEncodable};
 use serde::Serialize;
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::mode::Mode;
 use crate::transport::{Destination, Transport};
 use crate::types::{HostAnswer, Instance, Protocol, ServiceType};
@@ -35,10 +35,25 @@ pub async fn probe_service(service: &ServiceType, opts: &ProbeOptions) -> Result
     let transport = Transport::build(Mode::QueryOnly)?;
     let qname = parse_name(&service.fqdn())?;
     let msg = build_query(&qname, RecordType::PTR);
-    send_and_collect(&transport, &msg, opts.timeout, |records| {
-        decode_instances(service, records)
-    })
-    .await
+    let first_window = opts.timeout / 2;
+    let first_window = if first_window.is_zero() {
+        opts.timeout
+    } else {
+        first_window
+    };
+    let mut records = collect_records(&transport, &msg, first_window).await?;
+    let targets = decode_ptr_targets(&service.fqdn(), &records);
+    if !targets.is_empty() {
+        let remaining = opts.timeout.saturating_sub(first_window);
+        let second_window = if remaining.is_zero() {
+            opts.timeout
+        } else {
+            remaining
+        };
+        let followup = build_instance_queries(&targets)?;
+        records.extend(collect_records(&transport, &followup, second_window).await?);
+    }
+    Ok(decode_instances(service, &records))
 }
 
 pub async fn probe_instance(
@@ -49,7 +64,10 @@ pub async fn probe_instance(
     let transport = Transport::build(Mode::QueryOnly)?;
     let fqdn = format!("{}.{}", instance_name, service.fqdn());
     let qname = parse_name(&fqdn)?;
-    let msg = build_query(&qname, RecordType::SRV);
+    let mut msg = build_query(&qname, RecordType::SRV);
+    let mut txt_q = Query::query(qname, RecordType::TXT);
+    txt_q.set_query_class(DNSClass::IN);
+    msg.add_query(txt_q);
     send_and_collect(&transport, &msg, opts.timeout, |records| {
         decode_instances(service, records)
     })
@@ -109,7 +127,7 @@ pub async fn discover_service_types(opts: &ProbeOptions) -> Result<Vec<ServiceTy
     let pairs: Vec<(String, String)> =
         send_and_collect(&transport, &q_msg, half, decode_ptr_pairs).await?;
 
-    let mut counts: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut counts: HashMap<String, HashSet<String>> = HashMap::with_capacity(unique.len());
     for (owner, target) in pairs {
         counts.entry(owner).or_default().insert(target);
     }
@@ -179,7 +197,7 @@ fn parse_service_type_from_name(s: &str) -> Option<ServiceType> {
 }
 
 fn parse_name(s: &str) -> Result<Name> {
-    Name::from_utf8(s).map_err(|_| Error::InvalidServiceType(s.to_string()))
+    crate::name_util::lax_from_str(s)
 }
 
 fn build_query(name: &Name, qtype: RecordType) -> Message {
@@ -193,6 +211,23 @@ fn build_query(name: &Name, qtype: RecordType) -> Message {
     msg
 }
 
+fn build_instance_queries(targets: &[String]) -> Result<Message> {
+    let mut msg = Message::new();
+    msg.set_message_type(MessageType::Query)
+        .set_op_code(OpCode::Query)
+        .set_recursion_desired(false);
+    for target in targets {
+        let name = parse_name(target)?;
+        let mut srv_q = Query::query(name.clone(), RecordType::SRV);
+        srv_q.set_query_class(DNSClass::IN);
+        msg.add_query(srv_q);
+        let mut txt_q = Query::query(name, RecordType::TXT);
+        txt_q.set_query_class(DNSClass::IN);
+        msg.add_query(txt_q);
+    }
+    Ok(msg)
+}
+
 async fn send_and_collect<T, F>(
     transport: &Transport,
     msg: &Message,
@@ -202,10 +237,18 @@ async fn send_and_collect<T, F>(
 where
     F: Fn(&[Record]) -> Vec<T>,
 {
+    let records = collect_records(transport, msg, timeout).await?;
+    Ok(decode(&records))
+}
+
+async fn collect_records(
+    transport: &Transport,
+    msg: &Message,
+    timeout: Duration,
+) -> Result<Vec<Record>> {
     let bytes = msg.to_bytes()?;
     transport.send_query(&bytes, Destination::Multicast).await?;
-    let mut buf = vec![0u8; 9000];
-    let mut records: Vec<Record> = Vec::new();
+    let mut records: Vec<Record> = Vec::with_capacity(msg.queries().len() * 4);
     let deadline = tokio::time::Instant::now() + timeout;
 
     loop {
@@ -213,18 +256,9 @@ where
         if remaining.is_zero() {
             break;
         }
-        let recv = async {
-            if let Some(s) = transport.v4() {
-                s.recv_from(&mut buf).await
-            } else if let Some(s) = transport.v6() {
-                s.recv_from(&mut buf).await
-            } else {
-                Err(std::io::Error::other("no socket"))
-            }
-        };
-        match tokio::time::timeout(remaining, recv).await {
-            Ok(Ok((n, _addr))) => {
-                if let Ok(parsed) = Message::from_bytes(buf.get(..n).unwrap_or(&[])) {
+        match tokio::time::timeout(remaining, transport.recv_packet()).await {
+            Ok(Ok(payload)) => {
+                if let Ok(parsed) = Message::from_bytes(&payload) {
                     for r in parsed.answers() {
                         records.push(r.clone());
                     }
@@ -239,7 +273,28 @@ where
             Err(_) => break,
         }
     }
-    Ok(decode(&records))
+    Ok(records)
+}
+
+fn decode_ptr_targets(owner: &str, records: &[Record]) -> Vec<String> {
+    let owner_norm = strip_trailing_dot(owner).to_ascii_lowercase();
+    let mut targets: Vec<String> = records
+        .iter()
+        .filter_map(|r| {
+            if r.record_type() != RecordType::PTR
+                || strip_trailing_dot(&r.name().to_string()).to_ascii_lowercase() != owner_norm
+            {
+                return None;
+            }
+            match r.data() {
+                Some(RData::PTR(ptr)) => Some(ptr.0.to_string()),
+                _ => None,
+            }
+        })
+        .collect();
+    targets.sort();
+    targets.dedup();
+    targets
 }
 
 #[allow(
@@ -284,7 +339,7 @@ fn decode_instances(service: &ServiceType, records: &[Record]) -> Vec<Instance> 
 }
 
 fn decode_host_answers(host: &str, records: &[Record]) -> Vec<HostAnswer> {
-    let mut addrs: Vec<IpAddr> = Vec::new();
+    let mut addrs: Vec<IpAddr> = Vec::with_capacity(2);
     for r in records {
         match r.data() {
             Some(RData::A(A(ip))) => addrs.push(IpAddr::V4(*ip)),
@@ -372,21 +427,17 @@ pub async fn enum_host(host: &str, opts: &ProbeOptions) -> Result<HostEnumeratio
 
     let host_norm = strip_trailing_dot(host).to_ascii_lowercase();
 
-    let mut addrs: Vec<IpAddr> = Vec::new();
+    let mut addrs: Vec<IpAddr> = Vec::with_capacity(2);
     // owner -> (port, ServiceType)
     let mut srv_owners: BTreeMap<String, (u16, ServiceType)> = BTreeMap::new();
     let mut txt_by_owner: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
 
     for r in &records {
         match r.data() {
-            Some(RData::A(A(ip)))
-                if matches_host(&r.name().to_string(), &host_norm) =>
-            {
+            Some(RData::A(A(ip))) if matches_host(&r.name().to_string(), &host_norm) => {
                 addrs.push(IpAddr::V4(*ip));
             }
-            Some(RData::AAAA(AAAA(ip)))
-                if matches_host(&r.name().to_string(), &host_norm) =>
-            {
+            Some(RData::AAAA(AAAA(ip))) if matches_host(&r.name().to_string(), &host_norm) => {
                 addrs.push(IpAddr::V6(*ip));
             }
             Some(RData::SRV(srv)) => {
@@ -456,10 +507,7 @@ fn split_kv_string(raw: &[u8]) -> Option<(String, String)> {
             s.push_str("0x");
             for b in value_bytes {
                 // SAFETY: write! on String is infallible
-                let _r = std::fmt::Write::write_fmt(
-                    &mut s,
-                    format_args!("{b:02x}"),
-                );
+                let _r = std::fmt::Write::write_fmt(&mut s, format_args!("{b:02x}"));
             }
             s
         },
@@ -493,6 +541,16 @@ mod tests {
         let m = build_query(&n, RecordType::PTR);
         assert_eq!(m.message_type(), MessageType::Query);
         assert_eq!(m.queries().len(), 1);
+    }
+
+    #[test]
+    fn build_instance_queries_adds_srv_and_txt_for_each_target() {
+        let msg = build_instance_queries(&[
+            "Living._airplay._tcp.local.".to_string(),
+            "Office._airplay._tcp.local.".to_string(),
+        ])
+        .expect("queries");
+        assert_eq!(msg.queries().len(), 4);
     }
 
     #[test]

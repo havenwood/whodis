@@ -13,7 +13,9 @@ use crate::browse::{Browser, Event};
 use crate::error::Result as WhResult;
 use crate::flood::{self, FloodOptions};
 use crate::mode::Mode;
-use crate::output::{ColorMode, Renderer, emit_browse_event, emit_host_enumeration, emit_instance};
+use crate::output::{
+    ColorMode, Renderer, emit_browse_event, emit_host_answers, emit_host_enumeration, emit_instance,
+};
 use crate::probe::{self, ProbeOptions};
 use crate::spoof_template::{self, Template};
 use crate::types::{Protocol, ServiceType};
@@ -266,8 +268,19 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             allow_instance,
             relay,
         } => {
-            run_spoof(renderer, table, template, name, ip, burst, allow, allow_instance, relay, scope)
-                .await?;
+            run_spoof(
+                renderer,
+                table,
+                template,
+                name,
+                ip,
+                burst,
+                allow,
+                allow_instance,
+                relay,
+                scope,
+            )
+            .await?;
         }
         Cmd::Enum { host, timeout } => {
             let opts = ProbeOptions {
@@ -277,11 +290,9 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             emit_host_enumeration(renderer, &result)?;
         }
         Cmd::Clone { instance, timeout } => {
-            let cloned = crate::clone::clone_instance(
-                &instance,
-                std::time::Duration::from_secs(timeout),
-            )
-            .await?;
+            let cloned =
+                crate::clone::clone_instance(&instance, std::time::Duration::from_secs(timeout))
+                    .await?;
             crate::output::emit_raw(&cloned.to_toml())?;
         }
         Cmd::Flood { kind } => run_flood(kind, scope).await?,
@@ -415,9 +426,7 @@ async fn run_probe(
     };
     if let Some(h) = host {
         let answers = probe::probe_host(&h, &opts).await?;
-        for a in answers {
-            crate::output::emit_jsonl(&a)?;
-        }
+        emit_host_answers(renderer, &answers)?;
         return Ok(());
     }
     let Some(service) = service else {
@@ -652,9 +661,8 @@ mod tests {
         reason = "test assertion intentionally panics on wrong variant"
     )]
     fn cli_parses_enum_with_custom_timeout() {
-        let c =
-            Cli::try_parse_from(["whodis", "enum", "192-168-50-179.local.", "-t", "8"])
-                .expect("parse");
+        let c = Cli::try_parse_from(["whodis", "enum", "192-168-50-179.local.", "-t", "8"])
+            .expect("parse");
         match c.command {
             Cmd::Enum { host, timeout } => {
                 assert_eq!(host, "192-168-50-179.local.");

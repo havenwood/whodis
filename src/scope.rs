@@ -47,7 +47,11 @@ impl Scope {
     /// Build an `Authorization` from this scope, then layer additional CLI-passed
     /// subnets and instances on top.
     #[must_use]
-    pub(crate) fn into_auth(self, extra_subnets: Vec<IpNet>, extra_instances: Vec<String>) -> Authorization {
+    pub(crate) fn into_auth(
+        self,
+        extra_subnets: Vec<IpNet>,
+        extra_instances: Vec<String>,
+    ) -> Authorization {
         let mut auth = Authorization::new();
         for net in self.allow_subnet {
             auth = auth.allow_subnet(net);

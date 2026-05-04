@@ -274,12 +274,20 @@ async fn handle_message(
         }
     }
 
+    emit_staged(staged, cache, out).await;
+}
+
+async fn emit_staged(
+    staged: BTreeMap<String, Instance>,
+    cache: &DashMap<String, CacheEntry>,
+    out: &mpsc::Sender<Event>,
+) {
     for (key, inst) in staged {
-        if inst.port == 0 {
-            continue;
-        }
         match cache.get(&key) {
             None => {
+                if inst.port == 0 {
+                    continue;
+                }
                 out.send(Event::InstanceFound {
                     instance: inst.clone(),
                 })
@@ -287,18 +295,39 @@ async fn handle_message(
                 .ok();
                 cache.insert(key, CacheEntry { instance: inst });
             }
-            Some(prev) if prev.instance != inst => {
+            Some(prev) => {
+                let mut merged = prev.instance.clone();
+                let original = merged.clone();
                 drop(prev);
+                merge_partial(&mut merged, inst);
+                if merged == original || merged.port == 0 {
+                    continue;
+                }
                 out.send(Event::InstanceUpdated {
-                    instance: inst.clone(),
+                    instance: merged.clone(),
                 })
                 .await
                 .ok();
-                cache.insert(key, CacheEntry { instance: inst });
+                cache.insert(key, CacheEntry { instance: merged });
             }
-            _ => {}
         }
     }
+}
+
+fn merge_partial(base: &mut Instance, partial: Instance) {
+    if partial.service_type.name != "_unknown" {
+        base.service_type = partial.service_type;
+    }
+    if !partial.instance_name.is_empty() {
+        base.instance_name = partial.instance_name;
+    }
+    if !partial.host.is_empty() {
+        base.host = partial.host;
+    }
+    if partial.port != 0 {
+        base.port = partial.port;
+    }
+    base.txt.extend(partial.txt);
 }
 
 /// Extract the target Name from a PTR record. hickory-proto 0.24 represents PTR as
@@ -371,5 +400,31 @@ mod tests {
     fn build_query_returns_nonempty_bytes() {
         let bytes = build_query("_airplay._tcp.local.", RecordType::PTR).expect("build");
         assert!(bytes.len() > 12);
+    }
+
+    #[test]
+    fn merge_partial_preserves_cached_fields() {
+        let mut base = Instance {
+            service_type: ServiceType::new("_airplay", Protocol::Tcp),
+            instance_name: "Living".into(),
+            host: "Living.local.".into(),
+            port: 7000,
+            txt: BTreeMap::new(),
+        };
+        let mut partial_txt = BTreeMap::new();
+        partial_txt.insert("model".into(), Bytes::from_static(b"AppleTV11,1"));
+        let partial = Instance {
+            service_type: empty_service(),
+            instance_name: "Living".into(),
+            host: String::new(),
+            port: 0,
+            txt: partial_txt,
+        };
+
+        merge_partial(&mut base, partial);
+
+        assert_eq!(base.host, "Living.local.");
+        assert_eq!(base.port, 7000);
+        assert!(base.txt.contains_key("model"));
     }
 }

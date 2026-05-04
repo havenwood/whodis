@@ -32,7 +32,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 
 use anyhow::{Context, anyhow};
 use hickory_proto::rr::rdata::{A, AAAA, PTR, SRV, TXT};
-use hickory_proto::rr::{Name, RData, RecordType};
+use hickory_proto::rr::{RData, RecordType};
 use serde::Deserialize;
 
 use crate::spoof::{AnswerTable, AnswerTableBuilder};
@@ -101,12 +101,17 @@ fn parse_rdata(qtype: RecordType, entry: &RawAnswer) -> anyhow::Result<RData> {
         }
         RecordType::PTR => {
             let data = entry.data.as_deref().context("`data` required for PTR")?;
-            Ok(RData::PTR(PTR(Name::from_utf8(data).context("ptr name")?)))
+            Ok(RData::PTR(PTR(
+                crate::name_util::lax_from_str(data).context("ptr name")?
+            )))
         }
         RecordType::SRV => {
             let port = entry.port.context("`port` required for SRV")?;
-            let target_str = entry.target.as_deref().context("`target` required for SRV")?;
-            let target = Name::from_utf8(target_str).context("srv target")?;
+            let target_str = entry
+                .target
+                .as_deref()
+                .context("`target` required for SRV")?;
+            let target = crate::name_util::lax_from_str(target_str).context("srv target")?;
             let priority = entry.priority.unwrap_or(0);
             let weight = entry.weight.unwrap_or(0);
             Ok(RData::SRV(SRV::new(priority, weight, port, target)))
@@ -151,8 +156,14 @@ mod tests {
             txt = ["model=AppleTV11,1"]
         "#;
         let t = load(src).expect("load");
-        assert!(t.lookup("Spoofed._airplay._tcp.local.", RecordType::SRV).is_some());
-        assert!(t.lookup("Spoofed._airplay._tcp.local.", RecordType::TXT).is_some());
+        assert!(
+            t.lookup("Spoofed._airplay._tcp.local.", RecordType::SRV)
+                .is_some()
+        );
+        assert!(
+            t.lookup("Spoofed._airplay._tcp.local.", RecordType::TXT)
+                .is_some()
+        );
     }
 
     #[test]

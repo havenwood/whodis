@@ -35,7 +35,7 @@ pub fn build(template: Template, name: &str, ip: Ipv4Addr) -> Result<AnswerTable
 }
 
 fn n(s: &str) -> Result<Name> {
-    Name::from_utf8(s).map_err(|_| Error::InvalidServiceType(s.to_string()))
+    crate::name_util::lax_from_str(s)
 }
 
 fn airplay(name: &str, ip: Ipv4Addr) -> Result<AnswerTable> {
@@ -67,6 +67,7 @@ fn airplay(name: &str, ip: Ipv4Addr) -> Result<AnswerTable> {
 /// Builds the RAOP instance `Name` whose first label is `<deviceid>@<name>`.
 ///
 /// `@` is not valid under STD3 rules so we bypass the text parser and use raw label bytes.
+/// For parsing a complete dotted fqdn string without STD3 validation, see `crate::name_util::lax_from_str`.
 fn raop_inst_name(deviceid: &str, name: &str, svc: &str) -> Result<Name> {
     let first_bytes = format!("{deviceid}@{name}");
     let rest = n(svc)?;
@@ -214,12 +215,14 @@ mod tests {
     fn airplay_template_has_full_record_set() {
         let t = build(Template::Airplay, "Test", Ipv4Addr::new(10, 0, 0, 1)).expect("build");
         assert!(t.lookup("_airplay._tcp.local.", RecordType::PTR).is_some());
-        assert!(t
-            .lookup("Test._airplay._tcp.local.", RecordType::SRV)
-            .is_some());
-        assert!(t
-            .lookup("Test._airplay._tcp.local.", RecordType::TXT)
-            .is_some());
+        assert!(
+            t.lookup("Test._airplay._tcp.local.", RecordType::SRV)
+                .is_some()
+        );
+        assert!(
+            t.lookup("Test._airplay._tcp.local.", RecordType::TXT)
+                .is_some()
+        );
         assert!(t.lookup("Test.local.", RecordType::A).is_some());
     }
 
@@ -257,9 +260,10 @@ mod tests {
             Ipv4Addr::new(10, 0, 0, 6),
         )
         .expect("build");
-        assert!(t
-            .lookup("_googlecast._tcp.local.", RecordType::PTR)
-            .is_some());
+        assert!(
+            t.lookup("_googlecast._tcp.local.", RecordType::PTR)
+                .is_some()
+        );
         assert!(t.lookup("LivingRoom.local.", RecordType::A).is_some());
     }
 }

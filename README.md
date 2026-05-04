@@ -120,7 +120,7 @@ Supported qtypes: `A`, `AAAA`, `PTR`, `SRV`, `TXT`. `PTR` responses bundle relat
 
 ## Clone
 
-Capture an instance that is actually on the LAN and emit a TOML answer table that mimics it byte-for-byte. The output replays through `whodis spoof` for engagement-grade impersonation. Pair with `--relay` to MITM the real device.
+Capture an instance that is actually on the LAN and emit a TOML answer table that mimics its PTR / SRV / TXT / A / AAAA records. The output replays through `whodis spoof` for engagement-grade impersonation. Pair with `--relay` to MITM the real device.
 
 ```sh
 whodis clone "Living Room AppleTV._airplay._tcp.local." > clone.toml

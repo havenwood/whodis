@@ -19,7 +19,7 @@ const DEFAULT_RATE_PPS: u32 = 50;
 #[derive(Debug, Clone, Copy)]
 pub struct FloodOptions {
     pub rate_pps: NonZeroU32,
-    pub count: usize,    // 0 means forever
+    pub count: usize, // 0 means forever
 }
 
 impl Default for FloodOptions {
@@ -46,17 +46,30 @@ pub async fn goodbye(
     let transport = Arc::new(Transport::build(mode)?);
     let limiter = limiter(opts.rate_pps);
 
-    let mut sent = 0_usize;
-    let limit = if opts.count == 0 { usize::MAX } else { opts.count };
+    let mut packets = Vec::with_capacity(targets.len());
     for fqdn in targets {
         if !auth.permits_instance(&strip_dot(fqdn)) {
             tracing::warn!(target = %fqdn, "blocked by allow-list");
             continue;
         }
-        let bytes = build_goodbye(fqdn)?;
-        for _ in 0..limit {
+        packets.push(build_goodbye(fqdn)?);
+    }
+    if packets.is_empty() {
+        return Ok(0);
+    }
+    if opts.count == 0 {
+        loop {
+            for bytes in &packets {
+                limiter.until_ready().await;
+                transport.send_query(bytes, Destination::Multicast).await?;
+            }
+        }
+    }
+    let mut sent = 0_usize;
+    for bytes in &packets {
+        for _ in 0..opts.count {
             limiter.until_ready().await;
-            transport.send_query(&bytes, Destination::Multicast).await?;
+            transport.send_query(bytes, Destination::Multicast).await?;
             sent += 1;
         }
     }
@@ -78,17 +91,30 @@ pub async fn conflict_rename(
     let transport = Arc::new(Transport::build(mode)?);
     let limiter = limiter(opts.rate_pps);
 
-    let mut sent = 0_usize;
-    let limit = if opts.count == 0 { usize::MAX } else { opts.count };
+    let mut packets = Vec::with_capacity(targets.len());
     for fqdn in targets {
         if !auth.permits_instance(&strip_dot(fqdn)) {
             tracing::warn!(target = %fqdn, "blocked by allow-list");
             continue;
         }
-        let bytes = build_conflict(fqdn)?;
-        for _ in 0..limit {
+        packets.push(build_conflict(fqdn)?);
+    }
+    if packets.is_empty() {
+        return Ok(0);
+    }
+    let mut sent = 0_usize;
+    if opts.count == 0 {
+        loop {
+            for bytes in &packets {
+                limiter.until_ready().await;
+                transport.send_query(bytes, Destination::Multicast).await?;
+            }
+        }
+    }
+    for bytes in &packets {
+        for _ in 0..opts.count {
             limiter.until_ready().await;
-            transport.send_query(&bytes, Destination::Multicast).await?;
+            transport.send_query(bytes, Destination::Multicast).await?;
             sent += 1;
         }
     }

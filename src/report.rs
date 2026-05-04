@@ -31,7 +31,9 @@ pub(crate) async fn write(out_path: &Path, window_secs: u64) -> Result<usize> {
     let opts = ProbeOptions {
         timeout: Duration::from_secs(secs / 2 + 1),
     };
-    let service_types = probe::discover_service_types(&opts).await.unwrap_or_default();
+    let service_types = probe::discover_service_types(&opts)
+        .await
+        .unwrap_or_default();
 
     // Phase 2: snapshot instances.
     let instances = collect_instances(secs).await;
@@ -61,8 +63,7 @@ async fn collect_instances(window_secs: u64) -> Vec<Instance> {
     tokio::pin!(stream);
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(window_secs);
-    let mut seen: std::collections::BTreeMap<String, Instance> =
-        std::collections::BTreeMap::new();
+    let mut seen: std::collections::BTreeMap<String, Instance> = std::collections::BTreeMap::new();
     while tokio::time::Instant::now() < deadline {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         match tokio::time::timeout(remaining, stream.next()).await {
@@ -143,12 +144,10 @@ fn build_markdown(
 fn format_iso8601(t: SystemTime) -> String {
     let dur = t.duration_since(UNIX_EPOCH).unwrap_or_default();
     let secs = dur.as_secs();
-    let when =
-        time::OffsetDateTime::from_unix_timestamp(i64::try_from(secs).unwrap_or(0))
-            .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
-    let local = when.to_offset(
-        time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC),
-    );
+    let when = time::OffsetDateTime::from_unix_timestamp(i64::try_from(secs).unwrap_or(0))
+        .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
+    let local =
+        when.to_offset(time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC));
     format!(
         "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
         local.year(),
@@ -171,14 +170,14 @@ fn format_txt_highlights(inst: &Instance) -> String {
     // Show up to 3 most useful TXT keys: model, deviceid/id, ty/product, fn, am, md.
     const KEYS_OF_INTEREST: &[&str] =
         &["model", "deviceid", "id", "ty", "product", "fn", "am", "md"];
-    let mut parts: Vec<String> = Vec::new();
+    let mut parts: Vec<String> = Vec::with_capacity(3);
     for key in KEYS_OF_INTEREST {
         if parts.len() >= 3 {
             break;
         }
         if let Some(v) = inst.txt.get(*key) {
-            let value = std::str::from_utf8(v)
-                .map_or_else(|_| format!("0x{}", hex_short(v)), String::from);
+            let value =
+                std::str::from_utf8(v).map_or_else(|_| format!("0x{}", hex_short(v)), String::from);
             parts.push(format!("`{key}={}`", escape_md(&value)));
         }
     }
@@ -221,10 +220,7 @@ mod tests {
             instance_count: 2,
         };
         let inst = Instance {
-            service_type: crate::types::ServiceType::new(
-                "_airplay",
-                crate::types::Protocol::Tcp,
-            ),
+            service_type: crate::types::ServiceType::new("_airplay", crate::types::Protocol::Tcp),
             instance_name: "Foo".into(),
             host: "Foo.local.".into(),
             port: 7000,
