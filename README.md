@@ -27,6 +27,7 @@ cargo install --path .
 | `enum`    | Per-host service deep dive |
 | `capture` | Dump mDNS to a pcap file |
 | `spoof`   | Authoritative responder, optionally with a TCP relay |
+| `clone`   | Capture a real instance to a TOML answer table |
 | `flood`   | Goodbye and conflict-rename floods |
 | `report`  | Markdown engagement report |
 
@@ -116,6 +117,17 @@ data = "10.0.5.42"
 ```
 
 Supported qtypes: `A`, `AAAA`, `PTR`, `SRV`, `TXT`. `PTR` responses bundle related `SRV` / `TXT` / `A` / `AAAA` as additionals so one client query fully hydrates the instance.
+
+## Clone
+
+Capture an instance that is actually on the LAN and emit a TOML answer table that mimics it byte-for-byte. The output replays through `whodis spoof` for engagement-grade impersonation. Pair with `--relay` to MITM the real device.
+
+```sh
+whodis clone "Living Room AppleTV._airplay._tcp.local." > clone.toml
+whodis spoof clone.toml --relay 10.0.5.20:7000 --allow 10.0.5.0/24
+```
+
+`-t SECS` (default 5) bounds the listen window. Exits non-zero if no records arrive in the window.
 
 ## Flood
 

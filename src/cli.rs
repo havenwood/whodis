@@ -157,6 +157,16 @@ pub enum Cmd {
         timeout: u64,
     },
 
+    /// Capture a real LAN instance and emit a TOML answer table mimicking it.
+    Clone {
+        /// Instance fqdn, e.g. `LivingRoomTV._airplay._tcp.local.`.
+        instance: String,
+
+        /// Listen window in seconds. Exits non-zero if no records arrive in time.
+        #[arg(short = 't', long, default_value_t = 5)]
+        timeout: u64,
+    },
+
     /// Generate a Markdown engagement report.
     Report {
         /// Output Markdown file path. If --scope sets `log_dir`, path is relative to it.
@@ -265,6 +275,14 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             };
             let result = probe::enum_host(&host, &opts).await?;
             emit_host_enumeration(renderer, &result)?;
+        }
+        Cmd::Clone { instance, timeout } => {
+            let cloned = crate::clone::clone_instance(
+                &instance,
+                std::time::Duration::from_secs(timeout),
+            )
+            .await?;
+            crate::output::emit_raw(&cloned.to_toml())?;
         }
         Cmd::Flood { kind } => run_flood(kind, scope).await?,
         Cmd::Capture { pcap, timeout } => {

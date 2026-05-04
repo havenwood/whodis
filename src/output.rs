@@ -38,6 +38,14 @@ pub(crate) enum Renderer {
     Pretty(ColorMode),
 }
 
+/// Write a raw string to stdout. Used by subcommands that produce non-JSONL output (e.g. clone).
+#[allow(clippy::print_stdout, reason = "output.rs is the designated CLI stdout sink")]
+pub(crate) fn emit_raw(s: &str) -> io::Result<()> {
+    let mut out = io::stdout().lock();
+    out.write_all(s.as_bytes())?;
+    out.flush()
+}
+
 pub(crate) fn emit_jsonl<T: Serialize>(value: &T) -> io::Result<()> {
     let mut out = io::stdout().lock();
     serde_json::to_writer(&mut out, value)?;

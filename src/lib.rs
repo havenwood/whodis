@@ -7,6 +7,7 @@
 mod auth;
 mod capture;
 mod cli;
+mod clone;
 mod error;
 mod mode;
 mod output;
