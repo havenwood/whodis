@@ -146,6 +146,9 @@ mod tests {
         let target = SocketAddr::from(([127, 0, 0, 1], 1));
         let cancel = CancellationToken::new();
         let result = run(&[blocked_port], target, cancel).await;
-        assert!(result.is_err(), "expected Err when listen port is already bound");
+        assert!(
+            result.is_err(),
+            "expected Err when listen port is already bound"
+        );
     }
 }

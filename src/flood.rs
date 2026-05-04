@@ -21,6 +21,7 @@ const DEFAULT_RATE_PPS: u32 = 50;
 pub struct FloodOptions {
     pub rate_pps: NonZeroU32,
     pub count: usize, // 0 means forever
+    pub dry_run: bool,
 }
 
 impl Default for FloodOptions {
@@ -28,6 +29,7 @@ impl Default for FloodOptions {
         Self {
             rate_pps: NonZeroU32::new(DEFAULT_RATE_PPS).unwrap_or(NonZeroU32::MIN),
             count: 1,
+            dry_run: false,
         }
     }
 }
@@ -47,30 +49,38 @@ pub async fn goodbye(
     let transport = Arc::new(Transport::build(mode)?);
     let limiter = limiter(opts.rate_pps);
 
-    let mut packets = Vec::with_capacity(targets.len());
+    let mut packets: Vec<(&str, Vec<u8>)> = Vec::with_capacity(targets.len());
     for fqdn in targets {
         if !auth.permits_instance(&strip_dot(fqdn)) {
             tracing::warn!(target = %fqdn, "blocked by allow-list");
             continue;
         }
-        packets.push(build_goodbye(fqdn)?);
+        packets.push((fqdn.as_str(), build_goodbye(fqdn)?));
     }
     if packets.is_empty() {
         return Ok(0);
     }
     if opts.count == 0 {
         loop {
-            for bytes in &packets {
-                limiter.until_ready().await;
-                transport.send_query(bytes, Destination::Multicast).await?;
+            for (i, (fqdn, bytes)) in packets.iter().enumerate() {
+                if opts.dry_run {
+                    tracing::info!(target = %fqdn, bytes = bytes.len(), iter = i, "dry-run: would send");
+                } else {
+                    limiter.until_ready().await;
+                    transport.send_query(bytes, Destination::Multicast).await?;
+                }
             }
         }
     }
     let mut sent = 0_usize;
-    for bytes in &packets {
-        for _ in 0..opts.count {
-            limiter.until_ready().await;
-            transport.send_query(bytes, Destination::Multicast).await?;
+    for (fqdn, bytes) in &packets {
+        for i in 0..opts.count {
+            if opts.dry_run {
+                tracing::info!(target = %fqdn, bytes = bytes.len(), iter = i, "dry-run: would send");
+            } else {
+                limiter.until_ready().await;
+                transport.send_query(bytes, Destination::Multicast).await?;
+            }
             sent += 1;
         }
     }
@@ -92,13 +102,13 @@ pub async fn conflict_rename(
     let transport = Arc::new(Transport::build(mode)?);
     let limiter = limiter(opts.rate_pps);
 
-    let mut packets = Vec::with_capacity(targets.len());
+    let mut packets: Vec<(&str, Vec<u8>)> = Vec::with_capacity(targets.len());
     for fqdn in targets {
         if !auth.permits_instance(&strip_dot(fqdn)) {
             tracing::warn!(target = %fqdn, "blocked by allow-list");
             continue;
         }
-        packets.push(build_conflict(fqdn)?);
+        packets.push((fqdn.as_str(), build_conflict(fqdn)?));
     }
     if packets.is_empty() {
         return Ok(0);
@@ -106,16 +116,24 @@ pub async fn conflict_rename(
     let mut sent = 0_usize;
     if opts.count == 0 {
         loop {
-            for bytes in &packets {
-                limiter.until_ready().await;
-                transport.send_query(bytes, Destination::Multicast).await?;
+            for (i, (fqdn, bytes)) in packets.iter().enumerate() {
+                if opts.dry_run {
+                    tracing::info!(target = %fqdn, bytes = bytes.len(), iter = i, "dry-run: would send");
+                } else {
+                    limiter.until_ready().await;
+                    transport.send_query(bytes, Destination::Multicast).await?;
+                }
             }
         }
     }
-    for bytes in &packets {
-        for _ in 0..opts.count {
-            limiter.until_ready().await;
-            transport.send_query(bytes, Destination::Multicast).await?;
+    for (fqdn, bytes) in &packets {
+        for i in 0..opts.count {
+            if opts.dry_run {
+                tracing::info!(target = %fqdn, bytes = bytes.len(), iter = i, "dry-run: would send");
+            } else {
+                limiter.until_ready().await;
+                transport.send_query(bytes, Destination::Multicast).await?;
+            }
             sent += 1;
         }
     }
@@ -207,6 +225,26 @@ mod tests {
             is_srv_with_conflict,
             "expected SRV record with whodis-conflict target"
         );
+    }
+
+    #[tokio::test]
+    async fn dry_run_does_not_send_packets() {
+        use crate::auth::Authorization;
+        let auth = Authorization::new();
+        let opts = FloodOptions {
+            rate_pps: NonZeroU32::new(50).expect("rate"),
+            count: 3,
+            dry_run: true,
+        };
+        let mode = Mode::Custom {
+            group_v4: std::net::Ipv4Addr::new(239, 255, 99, 99),
+            group_v6: std::net::Ipv6Addr::new(0xff12, 0, 0, 0, 0, 0, 0, 0xabcd),
+            port: 15353,
+        };
+        let count = goodbye(mode, &["x._test._tcp.local.".to_string()], &auth, opts)
+            .await
+            .expect("goodbye");
+        assert_eq!(count, 3, "dry-run should still report intended send count");
     }
 
     #[tokio::test(start_paused = true)]

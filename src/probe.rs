@@ -617,8 +617,11 @@ mod tests {
         let our_host = Name::from_utf8("BedroomTV.local.").expect("name");
         let other_host = Name::from_utf8("Living.local.").expect("name");
 
-        let mut ours =
-            Record::from_rdata(our_host, 60, RData::A(A(std::net::Ipv4Addr::new(10, 0, 0, 5))));
+        let mut ours = Record::from_rdata(
+            our_host,
+            60,
+            RData::A(A(std::net::Ipv4Addr::new(10, 0, 0, 5))),
+        );
         ours.set_dns_class(DNSClass::IN);
         let mut theirs = Record::from_rdata(
             other_host,

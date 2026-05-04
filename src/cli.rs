@@ -4,7 +4,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use anyhow::Context;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use ipnet::IpNet;
 use tokio_stream::StreamExt;
 
@@ -51,6 +51,11 @@ pub struct Cli {
 
     #[arg(global = true, short = 'v', long, action = clap::ArgAction::Count)]
     pub verbose: u8,
+
+    /// Restrict operations to a single network interface (e.g. en0). Repeatable.
+    /// Default: all non-loopback interfaces.
+    #[arg(global = true, short = 'i', long = "interface", value_name = "NAME")]
+    pub interface: Vec<String>,
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, Copy)]
@@ -169,6 +174,12 @@ pub enum Cmd {
         timeout: u64,
     },
 
+    /// Print shell completions for the given shell to stdout.
+    Completions {
+        /// Shell to generate completions for.
+        shell: clap_complete::Shell,
+    },
+
     /// Generate a Markdown engagement report.
     Report {
         /// Output Markdown file path. If --scope sets `log_dir`, path is relative to it.
@@ -198,6 +209,9 @@ pub enum FloodCmd {
 
         #[arg(long)]
         forever: bool,
+
+        #[arg(long)]
+        dry_run: bool,
     },
     Conflict {
         #[arg(value_name = "INSTANCE")]
@@ -214,6 +228,9 @@ pub enum FloodCmd {
 
         #[arg(long)]
         forever: bool,
+
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -239,6 +256,9 @@ fn parse_positive_usize(s: &str) -> std::result::Result<usize, String> {
 
 pub async fn run(cli: Cli) -> anyhow::Result<()> {
     init_tracing(cli.quiet, cli.verbose);
+    if !cli.interface.is_empty() {
+        crate::transport::set_interface_filter(cli.interface.clone());
+    }
     let renderer = pick_renderer(&cli);
     let scope = match cli.scope.as_deref() {
         Some(p) => Some(crate::scope::Scope::load(p)?),
@@ -299,6 +319,15 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         Cmd::Capture { pcap, timeout } => {
             let count = crate::capture::run(&pcap, timeout).await?;
             tracing::info!(packets = count, file = %pcap.display(), "capture complete");
+        }
+        Cmd::Completions { shell } => {
+            let mut cmd = Cli::command();
+            let bin = cmd.get_name().to_string();
+            let mut out: Vec<u8> = Vec::new();
+            clap_complete::generate(shell, &mut cmd, bin, &mut out);
+            let s = std::str::from_utf8(&out)
+                .map_err(|e| anyhow::anyhow!("completions not utf-8: {e}"))?;
+            crate::output::emit_raw(s)?;
         }
         Cmd::Report { out, timeout } => {
             // If scope.log_dir is set and `out` is relative, resolve it inside log_dir.
@@ -521,11 +550,13 @@ async fn run_flood(kind: FloodCmd, scope: Option<crate::scope::Scope>) -> anyhow
             rate,
             count,
             forever,
+            dry_run,
         } => {
             let auth = build_auth(allow_instance, scope);
             let opts = FloodOptions {
                 rate_pps: NonZeroU32::new(rate).unwrap_or(NonZeroU32::MIN),
                 count: if forever { 0 } else { count },
+                dry_run,
             };
             flood::goodbye(Mode::Authoritative, &targets, &auth, opts).await?
         }
@@ -535,11 +566,13 @@ async fn run_flood(kind: FloodCmd, scope: Option<crate::scope::Scope>) -> anyhow
             rate,
             count,
             forever,
+            dry_run,
         } => {
             let auth = build_auth(allow_instance, scope);
             let opts = FloodOptions {
                 rate_pps: NonZeroU32::new(rate).unwrap_or(NonZeroU32::MIN),
                 count: if forever { 0 } else { count },
+                dry_run,
             };
             flood::conflict_rename(Mode::Authoritative, &targets, &auth, opts).await?
         }

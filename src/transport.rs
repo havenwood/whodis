@@ -5,13 +5,26 @@
 //! join the multicast group on every non-loopback interface we find.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use socket2::{Domain, Protocol as SockProtocol, SockRef, Socket, Type};
 use tokio::net::UdpSocket;
 
 use crate::error::Result;
 use crate::mode::Mode;
+
+static IFACE_FILTER: OnceLock<Vec<String>> = OnceLock::new();
+
+pub(crate) fn set_interface_filter(names: Vec<String>) {
+    drop(IFACE_FILTER.set(names));
+}
+
+fn iface_allowed(name: &str) -> bool {
+    match IFACE_FILTER.get() {
+        Some(filter) if !filter.is_empty() => filter.iter().any(|n| n == name),
+        _ => true,
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Destination {
@@ -151,6 +164,9 @@ fn list_interfaces() -> Result<(Vec<Ipv4Addr>, Vec<u32>)> {
     let mut v6 = Vec::with_capacity(ifaces.len());
     for iface in ifaces {
         if iface.is_loopback() {
+            continue;
+        }
+        if !iface_allowed(&iface.name) {
             continue;
         }
         match iface.ip() {

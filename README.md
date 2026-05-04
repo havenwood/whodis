@@ -141,9 +141,10 @@ whodis flood goodbye Foo._airplay._tcp.local.
 whodis flood goodbye Foo._airplay._tcp.local. --count 50
 whodis flood goodbye Foo._airplay._tcp.local. --forever
 whodis flood conflict Foo._airplay._tcp.local. --allow-instance Foo
+whodis flood goodbye Foo._airplay._tcp.local. --dry-run    # show what would be sent
 ```
 
-`--rate N` caps packets per second (default 50, minimum 1). `--count N` is per-target (default 1, minimum 1). `--forever` runs until Ctrl-C and conflicts with `--count`. A mismatched allow-list logs a warn and exits non-zero.
+`--rate N` caps packets per second (default 50, minimum 1). `--count N` is per-target (default 1, minimum 1). `--forever` runs until Ctrl-C and conflicts with `--count`. `--dry-run` logs what would be sent without actually sending any packets. A mismatched allow-list logs a warn and exits non-zero.
 
 ## Capture
 
@@ -176,6 +177,20 @@ Pair with `whodis capture --pcap` for raw packet evidence alongside the narrativ
 | Authoritative | `spoof`, `flood`                | yes (REUSEPORT) |
 
 `SO_REUSEPORT` lets us coexist with macOS `mDNSResponder`. If 5353 will not bind, the error points at firewall or sudo. No silent fallback.
+
+## Interface selection
+
+`-i NAME` (`--interface`) restricts operations to a specific interface, e.g. `en0`. Repeatable. Default: all non-loopback interfaces. Useful on laptops with VPN tunnels you don't want to leak mDNS into.
+
+## Shell completions
+
+```sh
+whodis completions zsh > "${fpath[1]}/_whodis"
+whodis completions bash > /usr/local/etc/bash_completion.d/whodis
+whodis completions fish > ~/.config/fish/completions/whodis.fish
+```
+
+Supported shells: `bash`, `elvish`, `fish`, `powershell`, `zsh`.
 
 ## Output
 

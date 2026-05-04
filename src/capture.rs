@@ -276,20 +276,14 @@ mod tests {
         let payload1 = b"hello mdns";
         write_packet(
             &mut buf,
-            SocketAddr::new(
-                std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50)),
-                5353,
-            ),
+            SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50)), 5353),
             payload1,
         )
         .expect("packet 1");
         let payload2 = b"another packet";
         write_packet(
             &mut buf,
-            SocketAddr::new(
-                std::net::IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
-                5353,
-            ),
+            SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 5353),
             payload2,
         )
         .expect("packet 2");
