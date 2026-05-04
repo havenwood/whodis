@@ -94,9 +94,11 @@ Disruptive. `goodbye` sends TTL=0 records to make neighbors re-announce (good fo
 whodis flood goodbye Foo._airplay._tcp.local.
 whodis flood goodbye --rate 10 Foo._airplay._tcp.local. Bar._ipp._tcp.local.
 whodis flood conflict Foo._airplay._tcp.local. --allow-instance Foo
+whodis flood goodbye Foo._airplay._tcp.local. --count 50
+whodis flood goodbye Foo._airplay._tcp.local. --forever
 ```
 
-`--rate` caps packets per second (default 50).
+`--rate` caps packets per second (default 50, minimum 1). `--count N` sends N packets per target (default 1, minimum 1). `--forever` repeats until Ctrl-C; mutually exclusive with `--count`.
 
 ## Demo: spoof, browse, flood together
 

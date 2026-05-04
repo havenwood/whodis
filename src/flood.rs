@@ -19,12 +19,14 @@ const DEFAULT_RATE_PPS: u32 = 50;
 #[derive(Debug, Clone, Copy)]
 pub struct FloodOptions {
     pub rate_pps: NonZeroU32,
+    pub count: usize,    // 0 means forever
 }
 
 impl Default for FloodOptions {
     fn default() -> Self {
         Self {
             rate_pps: NonZeroU32::new(DEFAULT_RATE_PPS).unwrap_or(NonZeroU32::MIN),
+            count: 1,
         }
     }
 }
@@ -45,15 +47,18 @@ pub async fn goodbye(
     let limiter = limiter(opts.rate_pps);
 
     let mut sent = 0_usize;
+    let limit = if opts.count == 0 { usize::MAX } else { opts.count };
     for fqdn in targets {
         if !auth.permits_instance(&strip_dot(fqdn)) {
             tracing::warn!(target = %fqdn, "blocked by allow-list");
             continue;
         }
         let bytes = build_goodbye(fqdn)?;
-        limiter.until_ready().await;
-        transport.send_query(&bytes, Destination::Multicast).await?;
-        sent += 1;
+        for _ in 0..limit {
+            limiter.until_ready().await;
+            transport.send_query(&bytes, Destination::Multicast).await?;
+            sent += 1;
+        }
     }
     Ok(sent)
 }
@@ -74,15 +79,18 @@ pub async fn conflict_rename(
     let limiter = limiter(opts.rate_pps);
 
     let mut sent = 0_usize;
+    let limit = if opts.count == 0 { usize::MAX } else { opts.count };
     for fqdn in targets {
         if !auth.permits_instance(&strip_dot(fqdn)) {
             tracing::warn!(target = %fqdn, "blocked by allow-list");
             continue;
         }
         let bytes = build_conflict(fqdn)?;
-        limiter.until_ready().await;
-        transport.send_query(&bytes, Destination::Multicast).await?;
-        sent += 1;
+        for _ in 0..limit {
+            limiter.until_ready().await;
+            transport.send_query(&bytes, Destination::Multicast).await?;
+            sent += 1;
+        }
     }
     Ok(sent)
 }

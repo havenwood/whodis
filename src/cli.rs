@@ -120,8 +120,14 @@ pub enum FloodCmd {
         #[arg(long = "allow-instance", value_name = "NAME")]
         allow_instance: Vec<String>,
 
-        #[arg(long, default_value_t = 50)]
+        #[arg(long, default_value_t = 50, value_parser = parse_positive_u32)]
         rate: u32,
+
+        #[arg(long, default_value_t = 1, conflicts_with = "forever", value_parser = parse_positive_usize)]
+        count: usize,
+
+        #[arg(long)]
+        forever: bool,
     },
     Conflict {
         #[arg(value_name = "INSTANCE")]
@@ -130,9 +136,35 @@ pub enum FloodCmd {
         #[arg(long = "allow-instance", value_name = "NAME")]
         allow_instance: Vec<String>,
 
-        #[arg(long, default_value_t = 50)]
+        #[arg(long, default_value_t = 50, value_parser = parse_positive_u32)]
         rate: u32,
+
+        #[arg(long, default_value_t = 1, conflicts_with = "forever", value_parser = parse_positive_usize)]
+        count: usize,
+
+        #[arg(long)]
+        forever: bool,
     },
+}
+
+fn parse_positive_u32(s: &str) -> std::result::Result<u32, String> {
+    let value = s
+        .parse::<u32>()
+        .map_err(|e| format!("expected positive integer: {e}"))?;
+    if value == 0 {
+        return Err("must be at least 1".to_string());
+    }
+    Ok(value)
+}
+
+fn parse_positive_usize(s: &str) -> std::result::Result<usize, String> {
+    let value = s
+        .parse::<usize>()
+        .map_err(|e| format!("expected positive integer: {e}"))?;
+    if value == 0 {
+        return Err("must be at least 1".to_string());
+    }
+    Ok(value)
 }
 
 pub async fn run(cli: Cli) -> anyhow::Result<()> {
@@ -319,10 +351,13 @@ async fn run_flood(kind: FloodCmd) -> anyhow::Result<()> {
             targets,
             allow_instance,
             rate,
+            count,
+            forever,
         } => {
             let auth = build_auth(allow_instance);
             let opts = FloodOptions {
                 rate_pps: NonZeroU32::new(rate).unwrap_or(NonZeroU32::MIN),
+                count: if forever { 0 } else { count },
             };
             flood::goodbye(Mode::Authoritative, &targets, &auth, opts).await?
         }
@@ -330,10 +365,13 @@ async fn run_flood(kind: FloodCmd) -> anyhow::Result<()> {
             targets,
             allow_instance,
             rate,
+            count,
+            forever,
         } => {
             let auth = build_auth(allow_instance);
             let opts = FloodOptions {
                 rate_pps: NonZeroU32::new(rate).unwrap_or(NonZeroU32::MIN),
+                count: if forever { 0 } else { count },
             };
             flood::conflict_rename(Mode::Authoritative, &targets, &auth, opts).await?
         }
@@ -425,6 +463,34 @@ mod tests {
     fn cli_validates_color_choice() {
         let c = Cli::try_parse_from(["whodis", "--color", "always", "browse"]).expect("parse");
         assert!(matches!(c.color, ColorChoice::Always));
+    }
+
+    #[test]
+    fn cli_rejects_zero_flood_rate() {
+        let err = Cli::try_parse_from([
+            "whodis",
+            "flood",
+            "goodbye",
+            "Foo._airplay._tcp.local.",
+            "--rate",
+            "0",
+        ]);
+
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn cli_rejects_zero_flood_count() {
+        let err = Cli::try_parse_from([
+            "whodis",
+            "flood",
+            "conflict",
+            "Foo._airplay._tcp.local.",
+            "--count",
+            "0",
+        ]);
+
+        assert!(err.is_err());
     }
 
     #[test]
