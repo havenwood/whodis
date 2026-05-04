@@ -73,8 +73,18 @@ impl AnswerTableBuilder {
 
     #[must_use]
     pub fn build(self) -> AnswerTable {
+        let entries = self.entries;
+        // Reverse-lookup map for chasing additionals (PTR -> SRV/TXT, SRV -> A/AAAA).
+        let mut by_key: HashMap<(String, RecordType), Vec<Record>> = HashMap::new();
+        for e in &entries {
+            by_key
+                .entry((normalize(&e.name), e.qtype))
+                .or_default()
+                .extend(e.records.iter().cloned());
+        }
+
         let mut map: HashMap<(String, RecordType), Vec<u8>> = HashMap::new();
-        for e in self.entries {
+        for e in &entries {
             let mut msg = Message::new();
             msg.set_message_type(MessageType::Response)
                 .set_authoritative(true)
@@ -82,11 +92,65 @@ impl AnswerTableBuilder {
             for r in &e.records {
                 msg.add_answer(r.clone());
             }
+            attach_additionals(&mut msg, &e.records, e.qtype, &by_key);
             if let Ok(bytes) = msg.to_bytes() {
                 map.insert((normalize(&e.name), e.qtype), bytes);
             }
         }
         AnswerTable { map }
+    }
+}
+
+fn attach_additionals(
+    msg: &mut Message,
+    answers: &[Record],
+    qtype: RecordType,
+    by_key: &HashMap<(String, RecordType), Vec<Record>>,
+) {
+    let mut hosts_to_resolve: Vec<String> = Vec::new();
+    match qtype {
+        RecordType::PTR => {
+            for r in answers {
+                let Some(RData::PTR(ptr)) = r.data() else {
+                    continue;
+                };
+                let target = ptr.0.to_string();
+                push_records(msg, by_key, &target, RecordType::SRV);
+                push_records(msg, by_key, &target, RecordType::TXT);
+                if let Some(srv_records) = by_key.get(&(normalize(&target), RecordType::SRV)) {
+                    for sr in srv_records {
+                        if let Some(RData::SRV(srv)) = sr.data() {
+                            hosts_to_resolve.push(srv.target().to_string());
+                        }
+                    }
+                }
+            }
+        }
+        RecordType::SRV => {
+            for r in answers {
+                if let Some(RData::SRV(srv)) = r.data() {
+                    hosts_to_resolve.push(srv.target().to_string());
+                }
+            }
+        }
+        _ => {}
+    }
+    for host in hosts_to_resolve {
+        push_records(msg, by_key, &host, RecordType::A);
+        push_records(msg, by_key, &host, RecordType::AAAA);
+    }
+}
+
+fn push_records(
+    msg: &mut Message,
+    by_key: &HashMap<(String, RecordType), Vec<Record>>,
+    name: &str,
+    qtype: RecordType,
+) {
+    if let Some(records) = by_key.get(&(normalize(name), qtype)) {
+        for r in records {
+            msg.add_additional(r.clone());
+        }
     }
 }
 

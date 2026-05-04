@@ -57,7 +57,7 @@ whodis spoof answers.toml --burst 3 --allow 192.168.1.0/24
 whodis spoof answers.toml --allow-instance "Living Room ATV"
 ```
 
-`answers.toml`:
+`answers.toml` for a fake AirPlay receiver:
 
 ```toml
 ttl = 120
@@ -68,12 +68,23 @@ qtype = "PTR"
 data = "Spoofed-AppleTV._airplay._tcp.local."
 
 [[answer]]
+name = "Spoofed-AppleTV._airplay._tcp.local."
+qtype = "SRV"
+port = 7000
+target = "Spoofed-AppleTV.local."
+
+[[answer]]
+name = "Spoofed-AppleTV._airplay._tcp.local."
+qtype = "TXT"
+txt = ["model=AppleTV11,1", "deviceid=AA:BB:CC:DD:EE:FF"]
+
+[[answer]]
 name = "Spoofed-AppleTV.local."
 qtype = "A"
 data = "192.168.1.42"
 ```
 
-Supported `qtype` values: `A`, `AAAA`, `PTR`.
+Supported `qtype` values: `A`, `AAAA`, `PTR`, `SRV`, `TXT`. The responder bundles related records as DNS additionals automatically (PTR responses include matching SRV / TXT / A / AAAA), so a single client query is enough to fully discover the spoofed instance.
 
 ## Flood
 
