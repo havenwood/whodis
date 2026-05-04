@@ -63,10 +63,10 @@ pub async fn goodbye(
     if opts.count == 0 {
         loop {
             for (i, (fqdn, bytes)) in packets.iter().enumerate() {
+                limiter.until_ready().await;
                 if opts.dry_run {
                     tracing::info!(target = %fqdn, bytes = bytes.len(), iter = i, "dry-run: would send");
                 } else {
-                    limiter.until_ready().await;
                     transport.send_query(bytes, Destination::Multicast).await?;
                 }
             }
@@ -117,10 +117,10 @@ pub async fn conflict_rename(
     if opts.count == 0 {
         loop {
             for (i, (fqdn, bytes)) in packets.iter().enumerate() {
+                limiter.until_ready().await;
                 if opts.dry_run {
                     tracing::info!(target = %fqdn, bytes = bytes.len(), iter = i, "dry-run: would send");
                 } else {
-                    limiter.until_ready().await;
                     transport.send_query(bytes, Destination::Multicast).await?;
                 }
             }
