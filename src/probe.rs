@@ -316,6 +316,162 @@ fn split_kv(raw: &[u8]) -> Option<(String, Bytes)> {
     Some((key, value))
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct HostEnumeration {
+    pub host: String,
+    pub addrs: Vec<IpAddr>,
+    pub services: Vec<HostServiceMatch>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HostServiceMatch {
+    pub service_type: String,
+    pub instance_name: String,
+    pub port: u16,
+    pub txt: BTreeMap<String, String>,
+}
+
+pub async fn enum_host(host: &str, opts: &ProbeOptions) -> Result<HostEnumeration> {
+    let transport = Transport::build(Mode::QueryOnly)?;
+    let half = opts.timeout / 2;
+
+    // Phase 1: discover service types via meta-query.
+    let meta_q = build_query(&parse_name(META_QUERY)?, RecordType::PTR);
+    let types: Vec<ServiceType> =
+        send_and_collect(&transport, &meta_q, half / 2, decode_service_types).await?;
+
+    let mut unique: Vec<ServiceType> = types;
+    unique.sort_by(|a, b| (a.protocol.as_str(), &a.name).cmp(&(b.protocol.as_str(), &b.name)));
+    unique.dedup();
+
+    // Phase 2: query PTR for every discovered type in one batch plus A/AAAA for host.
+    let mut q_msg = Message::new();
+    q_msg
+        .set_message_type(MessageType::Query)
+        .set_op_code(OpCode::Query)
+        .set_recursion_desired(false);
+    for st in &unique {
+        let n = parse_name(&st.fqdn())?;
+        let mut q = Query::query(n, RecordType::PTR);
+        q.set_query_class(DNSClass::IN);
+        q_msg.add_query(q);
+    }
+    let host_name = parse_name(host)?;
+    {
+        let mut q = Query::query(host_name.clone(), RecordType::A);
+        q.set_query_class(DNSClass::IN);
+        q_msg.add_query(q);
+        let mut q = Query::query(host_name, RecordType::AAAA);
+        q.set_query_class(DNSClass::IN);
+        q_msg.add_query(q);
+    }
+
+    let remaining = opts.timeout.saturating_sub(half / 2);
+    let records: Vec<Record> =
+        send_and_collect(&transport, &q_msg, remaining, <[Record]>::to_vec).await?;
+
+    let host_norm = strip_trailing_dot(host).to_ascii_lowercase();
+
+    let mut addrs: Vec<IpAddr> = Vec::new();
+    // owner -> (port, ServiceType)
+    let mut srv_owners: BTreeMap<String, (u16, ServiceType)> = BTreeMap::new();
+    let mut txt_by_owner: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+
+    for r in &records {
+        match r.data() {
+            Some(RData::A(A(ip)))
+                if matches_host(&r.name().to_string(), &host_norm) =>
+            {
+                addrs.push(IpAddr::V4(*ip));
+            }
+            Some(RData::AAAA(AAAA(ip)))
+                if matches_host(&r.name().to_string(), &host_norm) =>
+            {
+                addrs.push(IpAddr::V6(*ip));
+            }
+            Some(RData::SRV(srv)) => {
+                let target = srv.target().to_string();
+                if matches_host(&target, &host_norm) {
+                    let owner = r.name().to_string();
+                    let svc = parse_service_type_from_name(&owner)
+                        .unwrap_or_else(|| ServiceType::new("_unknown", Protocol::Tcp));
+                    srv_owners.insert(owner, (srv.port(), svc));
+                }
+            }
+            Some(RData::TXT(txt)) => {
+                let owner = r.name().to_string();
+                let mut map: BTreeMap<String, String> = BTreeMap::new();
+                for kv in txt.iter() {
+                    if let Some((k, v)) = split_kv_string(kv) {
+                        map.insert(k, v);
+                    }
+                }
+                txt_by_owner.entry(owner).or_default().extend(map);
+            }
+            _ => {}
+        }
+    }
+
+    let mut services: Vec<HostServiceMatch> = srv_owners
+        .into_iter()
+        .map(|(owner, (port, svc))| {
+            let instance_name = leftmost_label_string(&owner);
+            let txt = txt_by_owner.get(&owner).cloned().unwrap_or_default();
+            HostServiceMatch {
+                service_type: svc.fqdn(),
+                instance_name,
+                port,
+                txt,
+            }
+        })
+        .collect();
+    services.sort_by(|a, b| a.service_type.cmp(&b.service_type));
+
+    addrs.sort();
+    addrs.dedup();
+
+    Ok(HostEnumeration {
+        host: host.to_string(),
+        addrs,
+        services,
+    })
+}
+
+fn matches_host(rec_name: &str, host_norm: &str) -> bool {
+    strip_trailing_dot(rec_name).to_ascii_lowercase() == host_norm
+}
+
+fn strip_trailing_dot(s: &str) -> &str {
+    s.trim_end_matches('.')
+}
+
+fn split_kv_string(raw: &[u8]) -> Option<(String, String)> {
+    let eq = raw.iter().position(|b| *b == b'=')?;
+    let (k, rest) = raw.split_at(eq);
+    let key = std::str::from_utf8(k).ok()?.to_string();
+    let value_bytes = rest.get(1..)?;
+    let value = std::str::from_utf8(value_bytes).map_or_else(
+        |_| {
+            let mut s = String::with_capacity(value_bytes.len() * 2 + 2);
+            s.push_str("0x");
+            for b in value_bytes {
+                // SAFETY: write! on String is infallible
+                let _r = std::fmt::Write::write_fmt(
+                    &mut s,
+                    format_args!("{b:02x}"),
+                );
+            }
+            s
+        },
+        String::from,
+    );
+    Some((key, value))
+}
+
+fn leftmost_label_string(name: &str) -> String {
+    name.split('.').next().unwrap_or(name).to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -349,5 +505,44 @@ mod tests {
     #[test]
     fn split_kv_returns_none_on_no_equals() {
         assert!(split_kv(b"flag").is_none());
+    }
+
+    #[test]
+    fn split_kv_string_parses_utf8_value() {
+        let (k, v) = split_kv_string(b"model=AppleTV11,1").expect("split");
+        assert_eq!(k, "model");
+        assert_eq!(v, "AppleTV11,1");
+    }
+
+    #[test]
+    fn split_kv_string_returns_none_on_no_equals() {
+        assert!(split_kv_string(b"flag").is_none());
+    }
+
+    #[test]
+    fn split_kv_string_hex_fallback_for_binary_value() {
+        let (k, v) = split_kv_string(b"flags=\xff\x00").expect("split");
+        assert_eq!(k, "flags");
+        assert_eq!(v, "0xff00");
+    }
+
+    #[test]
+    fn leftmost_label_string_returns_first_label() {
+        assert_eq!(
+            leftmost_label_string("Brother HL-L2350DW._ipp._tcp.local."),
+            "Brother HL-L2350DW"
+        );
+    }
+
+    #[test]
+    fn matches_host_strips_dot_and_lowercases() {
+        assert!(matches_host("BedroomTV.local.", "bedroomtv.local"));
+        assert!(!matches_host("OtherHost.local.", "bedroomtv.local"));
+    }
+
+    #[test]
+    fn strip_trailing_dot_removes_trailing_dot() {
+        assert_eq!(strip_trailing_dot("foo.local."), "foo.local");
+        assert_eq!(strip_trailing_dot("foo.local"), "foo.local");
     }
 }

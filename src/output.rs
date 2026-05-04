@@ -6,7 +6,7 @@ use std::io::{self, IsTerminal, Write};
 use serde::Serialize;
 
 use crate::browse::Event;
-use crate::probe::ServiceTypeSummary;
+use crate::probe::{HostEnumeration, ServiceTypeSummary};
 use crate::types::{Device, Fingerprint, Instance};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -235,6 +235,56 @@ fn paint(enabled: bool, body: &str, color: &str) -> String {
     } else {
         body.to_string()
     }
+}
+
+pub(crate) fn emit_host_enumeration(
+    renderer: Renderer,
+    enumeration: &HostEnumeration,
+) -> io::Result<()> {
+    match renderer {
+        Renderer::Jsonl => emit_jsonl(enumeration),
+        Renderer::Pretty(c) => emit_host_enumeration_pretty(c, enumeration),
+    }
+}
+
+fn emit_host_enumeration_pretty(color: ColorMode, e: &HostEnumeration) -> io::Result<()> {
+    let on = color.enabled();
+    let mut out = io::stdout().lock();
+    writeln!(out, "{}", paint(on, &e.host, BOLD))?;
+    if !e.addrs.is_empty() {
+        let addrs = e
+            .addrs
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        writeln!(out, "  addrs    {addrs}")?;
+    }
+    if e.services.is_empty() {
+        writeln!(out, "  no services found")?;
+    } else {
+        for svc in &e.services {
+            writeln!(
+                out,
+                "  {} on port {}",
+                paint(on, &svc.service_type, BOLD),
+                svc.port
+            )?;
+            if !svc.instance_name.is_empty() {
+                writeln!(out, "    instance  {}", svc.instance_name)?;
+            }
+            if !svc.txt.is_empty() {
+                let txt = svc
+                    .txt
+                    .iter()
+                    .map(|(k, v)| format!("{k}={v}"))
+                    .collect::<Vec<_>>()
+                    .join("  ");
+                writeln!(out, "    txt       {txt}")?;
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

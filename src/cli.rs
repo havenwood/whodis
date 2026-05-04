@@ -13,7 +13,7 @@ use crate::browse::{Browser, Event};
 use crate::error::Result as WhResult;
 use crate::flood::{self, FloodOptions};
 use crate::mode::Mode;
-use crate::output::{ColorMode, Renderer, emit_browse_event, emit_instance};
+use crate::output::{ColorMode, Renderer, emit_browse_event, emit_host_enumeration, emit_instance};
 use crate::probe::{self, ProbeOptions};
 use crate::spoof_template::{self, Template};
 use crate::types::{Protocol, ServiceType};
@@ -122,6 +122,15 @@ pub enum Cmd {
         allow_instance: Vec<String>,
     },
 
+    /// Enumerate every service a single host advertises.
+    Enum {
+        /// Hostname to enumerate, e.g. `BedroomTV.local.`.
+        host: String,
+
+        #[arg(short = 't', long, default_value_t = 5)]
+        timeout: u64,
+    },
+
     /// Send goodbye or conflict-rename floods. Disruptive.
     Flood {
         #[command(subcommand)]
@@ -223,6 +232,13 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             allow_instance,
         } => {
             run_spoof(renderer, table, template, name, ip, burst, allow, allow_instance).await?;
+        }
+        Cmd::Enum { host, timeout } => {
+            let opts = ProbeOptions {
+                timeout: Duration::from_secs(timeout),
+            };
+            let result = probe::enum_host(&host, &opts).await?;
+            emit_host_enumeration(renderer, &result)?;
         }
         Cmd::Flood { kind } => run_flood(kind).await?,
         Cmd::Capture { pcap, timeout } => {
@@ -530,6 +546,40 @@ mod tests {
     fn cli_validates_color_choice() {
         let c = Cli::try_parse_from(["whodis", "--color", "always", "browse"]).expect("parse");
         assert!(matches!(c.color, ColorChoice::Always));
+    }
+
+    #[test]
+    #[allow(
+        clippy::panic,
+        reason = "test assertion intentionally panics on wrong variant"
+    )]
+    fn cli_parses_enum_subcommand() {
+        let c = Cli::try_parse_from(["whodis", "enum", "BedroomTV.local."]).expect("parse");
+        match c.command {
+            Cmd::Enum { host, timeout } => {
+                assert_eq!(host, "BedroomTV.local.");
+                assert_eq!(timeout, 5);
+            }
+            other => panic!("expected Enum, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[allow(
+        clippy::panic,
+        reason = "test assertion intentionally panics on wrong variant"
+    )]
+    fn cli_parses_enum_with_custom_timeout() {
+        let c =
+            Cli::try_parse_from(["whodis", "enum", "192-168-50-179.local.", "-t", "8"])
+                .expect("parse");
+        match c.command {
+            Cmd::Enum { host, timeout } => {
+                assert_eq!(host, "192-168-50-179.local.");
+                assert_eq!(timeout, 8);
+            }
+            other => panic!("expected Enum, got {other:?}"),
+        }
     }
 
     #[test]

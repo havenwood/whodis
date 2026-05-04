@@ -21,6 +21,7 @@ cargo install --path .
 |---|---|
 | `browse` | Watch the LAN for mDNS announcements |
 | `probe`  | One-shot directed mDNS query |
+| `enum`   | Per-host service deep dive |
 | `spoof`  | Authoritative responder reading a TOML answer table |
 | `flood`  | Goodbye / conflict-rename floods |
 
@@ -47,6 +48,15 @@ whodis probe _airplay._tcp.local.                                # all AirPlay r
 whodis probe _ipp._tcp.local. -t 5                               # printers, 5s window
 whodis probe _airplay._tcp.local. --instance "Living Room ATV"   # single instance
 whodis probe --host BedroomTV.local                              # resolve a hostname
+```
+
+## Enum
+
+Per-host deep dive. Lists every service that one host advertises by walking the DNS-SD meta-query then filtering SRV records by target.
+
+```sh
+whodis enum BedroomTV.local.
+whodis enum 192-168-50-179.local. -t 8     # longer window for sluggish LANs
 ```
 
 ## Spoof
