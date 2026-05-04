@@ -15,7 +15,7 @@ async fn goodbye_emits_event() {
     tokio::pin!(stream);
 
     // Give the browser time to bind and join the multicast group.
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     // Announce the instance so the browser caches it.
     send_fake_appletv_announcement();

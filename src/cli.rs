@@ -8,7 +8,7 @@ use ipnet::IpNet;
 use tokio_stream::StreamExt;
 
 use crate::auth::Authorization;
-use crate::browse::Browser;
+use crate::browse::{Browser, Event};
 use crate::error::Result as WhResult;
 use crate::flood::{self, FloodOptions};
 use crate::mode::Mode;
@@ -67,6 +67,10 @@ pub enum Cmd {
     Browse {
         #[arg(short = 't', long, default_value_t = 0)]
         timeout: u64,
+
+        /// Tag each instance with a vendor/product guess.
+        #[arg(short = 'f', long)]
+        fingerprint: bool,
     },
 
     /// Send a directed mDNS query.
@@ -83,9 +87,6 @@ pub enum Cmd {
         #[arg(short = 't', long, default_value_t = 3)]
         timeout: u64,
     },
-
-    /// Identify a device from a captured Instance (JSON on stdin).
-    Fingerprint,
 
     /// Run an authoritative responder.
     Spoof {
@@ -137,7 +138,10 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
     init_tracing(cli.quiet, cli.verbose);
     let renderer = pick_renderer(&cli);
     match cli.command {
-        Cmd::Browse { timeout } => run_browse(renderer, timeout).await?,
+        Cmd::Browse {
+            timeout,
+            fingerprint,
+        } => run_browse(renderer, timeout, fingerprint).await?,
         Cmd::Probe {
             service,
             instance,
@@ -146,7 +150,6 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         } => {
             run_probe(renderer, service, instance, host, timeout).await?;
         }
-        Cmd::Fingerprint => run_fingerprint(renderer)?,
         Cmd::Spoof {
             table,
             burst,
@@ -195,7 +198,11 @@ fn init_tracing(quiet: bool, verbose: u8) {
         .ok();
 }
 
-async fn run_browse(renderer: Renderer, timeout: u64) -> anyhow::Result<()> {
+async fn run_browse(
+    renderer: Renderer,
+    timeout: u64,
+    fingerprint: bool,
+) -> anyhow::Result<()> {
     let browser = Browser::new(Mode::Listen).context("starting browser")?;
     let cancel = browser.cancel_token();
     let stream = browser.run();
@@ -203,7 +210,17 @@ async fn run_browse(renderer: Renderer, timeout: u64) -> anyhow::Result<()> {
     let task = tokio::spawn(async move {
         tokio::pin!(stream);
         while let Some(event) = stream.next().await {
-            if let Err(e) = emit_browse_event(renderer, &event) {
+            let fp = if fingerprint {
+                match &event {
+                    Event::InstanceFound { instance } | Event::InstanceUpdated { instance } => {
+                        crate::fingerprint::identify(instance)
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            if let Err(e) = emit_browse_event(renderer, &event, fp.as_ref()) {
                 tracing::error!(error = %e, "emit failed");
                 break;
             }
@@ -253,17 +270,6 @@ async fn run_probe(
         let fp = crate::fingerprint::identify(&inst);
         emit_instance(renderer, &inst, fp.as_ref())?;
     }
-    Ok(())
-}
-
-fn run_fingerprint(renderer: Renderer) -> anyhow::Result<()> {
-    use std::io::Read;
-
-    let mut buf = String::new();
-    std::io::stdin().read_to_string(&mut buf)?;
-    let inst: crate::types::Instance = serde_json::from_str(&buf).context("parsing instance")?;
-    let fp = crate::fingerprint::identify(&inst);
-    emit_instance(renderer, &inst, fp.as_ref())?;
     Ok(())
 }
 
@@ -376,7 +382,7 @@ mod tests {
     fn cli_parses_browse_subcommand() {
         let c = Cli::try_parse_from(["whodis", "browse"]).expect("parse");
         match c.command {
-            Cmd::Browse { timeout } => assert_eq!(timeout, 0),
+            Cmd::Browse { timeout, .. } => assert_eq!(timeout, 0),
             other => panic!("expected Browse, got {other:?}"),
         }
     }

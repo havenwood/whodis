@@ -44,11 +44,23 @@ pub(crate) fn emit_jsonl<T: Serialize>(value: &T) -> io::Result<()> {
     out.flush()
 }
 
-pub(crate) fn emit_browse_event(renderer: Renderer, event: &Event) -> io::Result<()> {
+pub(crate) fn emit_browse_event(
+    renderer: Renderer,
+    event: &Event,
+    fp: Option<&Fingerprint>,
+) -> io::Result<()> {
     match renderer {
-        Renderer::Jsonl => emit_jsonl(event),
-        Renderer::Pretty(c) => emit_browse_pretty(c, event),
+        Renderer::Jsonl => emit_jsonl(&BrowseRecord { event, fingerprint: fp }),
+        Renderer::Pretty(c) => emit_browse_pretty(c, event, fp),
     }
+}
+
+#[derive(Serialize)]
+struct BrowseRecord<'a> {
+    #[serde(flatten)]
+    event: &'a Event,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fingerprint: Option<&'a Fingerprint>,
 }
 
 pub(crate) fn emit_instance(
@@ -66,10 +78,15 @@ pub(crate) fn emit_instance(
     }
 }
 
-fn emit_browse_pretty(color: ColorMode, event: &Event) -> io::Result<()> {
+fn emit_browse_pretty(
+    color: ColorMode,
+    event: &Event,
+    fp: Option<&Fingerprint>,
+) -> io::Result<()> {
     let on = color.enabled();
     let mut out = io::stdout().lock();
     let now = now_hms();
+    let tag = fp_tag(on, fp);
     match event {
         Event::ServiceTypeFound { service_type } => writeln!(
             out,
@@ -80,21 +97,23 @@ fn emit_browse_pretty(color: ColorMode, event: &Event) -> io::Result<()> {
         ),
         Event::InstanceFound { instance } => writeln!(
             out,
-            "  {}  {}  {:<28}  {:<16}  {}:{}",
+            "  {}  {}  {:<28}  {:<16}  {}:{}{}",
             paint(on, " +", GREEN),
             now,
             truncate(&instance.instance_name, 28),
             truncate(&instance.service_type.fqdn(), 16),
             instance.host,
             instance.port,
+            tag,
         ),
         Event::InstanceUpdated { instance } => writeln!(
             out,
-            "  {}  {}  {:<28}  {:<16}  txt update",
+            "  {}  {}  {:<28}  {:<16}  txt update{}",
             paint(on, " ~", YELLOW),
             now,
             truncate(&instance.instance_name, 28),
             truncate(&instance.service_type.fqdn(), 16),
+            tag,
         ),
         Event::InstanceGoodbye { fqdn } => writeln!(
             out,
@@ -105,6 +124,16 @@ fn emit_browse_pretty(color: ColorMode, event: &Event) -> io::Result<()> {
             "",
         ),
     }
+}
+
+fn fp_tag(on: bool, fp: Option<&Fingerprint>) -> String {
+    fp.map_or_else(String::new, |fp| {
+        let summary = fp.os_hint.as_ref().map_or_else(
+            || format!("{} {}", fp.vendor, fp.product),
+            |os| format!("{} {} ({os})", fp.vendor, fp.product),
+        );
+        format!("  {}", paint(on, &summary, BOLD))
+    })
 }
 
 fn emit_instance_pretty(

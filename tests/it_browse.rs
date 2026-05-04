@@ -17,7 +17,7 @@ async fn browse_finds_responder() {
     tokio::pin!(stream);
 
     // Give the browser time to bind and join the multicast group.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Send a fully-formed mDNS response (PTR + SRV + TXT) directly to the group.
     send_fake_appletv_announcement();

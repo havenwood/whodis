@@ -127,5 +127,5 @@ pub(crate) fn send_fake_appletv_goodbye() {
 }
 
 pub(crate) fn settle() -> Duration {
-    Duration::from_secs(2)
+    Duration::from_millis(500)
 }
