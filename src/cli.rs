@@ -88,9 +88,10 @@ pub enum Cmd {
         timeout: u64,
     },
 
-    /// Run an authoritative responder.
+    /// Run an authoritative responder against the given TOML answer table.
     Spoof {
-        #[arg(long, value_name = "FILE")]
+        /// Path to a TOML answer table.
+        #[arg(value_name = "TABLE")]
         table: std::path::PathBuf,
 
         #[arg(long, default_value_t = 3)]

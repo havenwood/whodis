@@ -5,7 +5,7 @@ mDNS / Bonjour recon and spoof, in Rust. macOS first.
 ```
 whodis browse --fingerprint
 whodis probe _airplay._tcp.local.
-whodis spoof --table answers.toml --burst 3 --allow 192.168.1.0/24
+whodis spoof answers.toml --burst 3 --allow 192.168.1.0/24
 whodis flood goodbye Foo._airplay._tcp.local.
 ```
 
@@ -53,8 +53,8 @@ whodis probe --host BedroomTV.local                              # resolve a hos
 Runs an authoritative responder. Reads a TOML answer table, listens on 5353, replies with `aa` set, optionally bursts the response to win the race against `mDNSResponder`.
 
 ```
-whodis spoof --table answers.toml --burst 3 --allow 192.168.1.0/24
-whodis spoof --table answers.toml --allow-instance "Living Room ATV"
+whodis spoof answers.toml --burst 3 --allow 192.168.1.0/24
+whodis spoof answers.toml --allow-instance "Living Room ATV"
 ```
 
 `answers.toml`:
