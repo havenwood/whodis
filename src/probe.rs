@@ -1,6 +1,6 @@
 //! One-shot directed mDNS queries.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::IpAddr;
 use std::time::Duration;
 
@@ -9,11 +9,12 @@ use hickory_proto::op::{Message, MessageType, OpCode, Query};
 use hickory_proto::rr::rdata::{A, AAAA};
 use hickory_proto::rr::{DNSClass, Name, RData, Record, RecordType};
 use hickory_proto::serialize::binary::{BinDecodable, BinEncodable};
+use serde::Serialize;
 
 use crate::error::{Error, Result};
 use crate::mode::Mode;
 use crate::transport::{Destination, Transport};
-use crate::types::{HostAnswer, Instance, ServiceType};
+use crate::types::{HostAnswer, Instance, Protocol, ServiceType};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -64,6 +65,114 @@ pub async fn probe_host(host: &str, opts: &ProbeOptions) -> Result<Vec<HostAnswe
         decode_host_answers(host, records)
     })
     .await
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ServiceTypeSummary {
+    pub fqdn: String,
+    pub instance_count: usize,
+}
+
+const META_QUERY: &str = "_services._dns-sd._udp.local.";
+
+/// Run an mDNS DNS-SD meta-query and return one summary per service type seen on the LAN,
+/// each tagged with the number of distinct instances it is currently advertising.
+pub async fn discover_service_types(opts: &ProbeOptions) -> Result<Vec<ServiceTypeSummary>> {
+    let transport = Transport::build(Mode::QueryOnly)?;
+    let half = opts.timeout / 2;
+
+    // Phase 1: ask for service-type names.
+    let meta_q = build_query(&parse_name(META_QUERY)?, RecordType::PTR);
+    let types: Vec<ServiceType> =
+        send_and_collect(&transport, &meta_q, half, decode_service_types).await?;
+
+    let mut unique: Vec<ServiceType> = types;
+    unique.sort_by(|a, b| (a.protocol.as_str(), &a.name).cmp(&(b.protocol.as_str(), &b.name)));
+    unique.dedup();
+    if unique.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Phase 2: ask for instance PTRs of every discovered type in one batch.
+    let mut q_msg = Message::new();
+    q_msg
+        .set_message_type(MessageType::Query)
+        .set_op_code(OpCode::Query)
+        .set_recursion_desired(false);
+    for st in &unique {
+        let n = parse_name(&st.fqdn())?;
+        let mut q = Query::query(n, RecordType::PTR);
+        q.set_query_class(DNSClass::IN);
+        q_msg.add_query(q);
+    }
+
+    let pairs: Vec<(String, String)> =
+        send_and_collect(&transport, &q_msg, half, decode_ptr_pairs).await?;
+
+    let mut counts: HashMap<String, HashSet<String>> = HashMap::new();
+    for (owner, target) in pairs {
+        counts.entry(owner).or_default().insert(target);
+    }
+
+    Ok(unique
+        .into_iter()
+        .map(|st| {
+            let fqdn = st.fqdn();
+            let instance_count = counts.get(&fqdn).map_or(0, HashSet::len);
+            ServiceTypeSummary { fqdn, instance_count }
+        })
+        .collect())
+}
+
+fn decode_service_types(records: &[Record]) -> Vec<ServiceType> {
+    records
+        .iter()
+        .filter_map(|r| {
+            if r.record_type() != RecordType::PTR
+                || r.name().to_string().trim_end_matches('.') != META_QUERY.trim_end_matches('.')
+            {
+                return None;
+            }
+            match r.data() {
+                Some(RData::PTR(ptr)) => parse_service_type_from_name(&ptr.0.to_string()),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+fn decode_ptr_pairs(records: &[Record]) -> Vec<(String, String)> {
+    records
+        .iter()
+        .filter_map(|r| {
+            if r.record_type() != RecordType::PTR {
+                return None;
+            }
+            match r.data() {
+                Some(RData::PTR(ptr)) => Some((r.name().to_string(), ptr.0.to_string())),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+fn parse_service_type_from_name(s: &str) -> Option<ServiceType> {
+    let trimmed = s.trim_end_matches('.').trim_end_matches(".local");
+    let parts: Vec<&str> = trimmed.split('.').collect();
+    let n = parts.len();
+    if n < 2 {
+        return None;
+    }
+    let proto = match parts.get(n - 1).copied() {
+        Some("_tcp") => Protocol::Tcp,
+        Some("_udp") => Protocol::Udp,
+        _ => return None,
+    };
+    let svc = (*parts.get(n - 2)?).to_string();
+    if !svc.starts_with('_') {
+        return None;
+    }
+    Some(ServiceType::new(svc, proto))
 }
 
 fn parse_name(s: &str) -> Result<Name> {

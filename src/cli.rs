@@ -73,10 +73,10 @@ pub enum Cmd {
         fingerprint: bool,
     },
 
-    /// Send a directed mDNS query.
+    /// Send a directed mDNS query. Without args, lists service types on the LAN.
     Probe {
-        /// Service type fqdn, e.g. `_airplay._tcp.local.`
-        service: String,
+        /// Service type fqdn, e.g. `_airplay._tcp.local.`. Omit to discover.
+        service: Option<String>,
 
         #[arg(long)]
         instance: Option<String>,
@@ -245,7 +245,7 @@ async fn run_browse(
 )]
 async fn run_probe(
     renderer: Renderer,
-    service: String,
+    service: Option<String>,
     instance: Option<String>,
     host: Option<String>,
     timeout: u64,
@@ -260,6 +260,11 @@ async fn run_probe(
         }
         return Ok(());
     }
+    let Some(service) = service else {
+        let summaries = probe::discover_service_types(&opts).await?;
+        crate::output::emit_service_type_summaries(renderer, &summaries)?;
+        return Ok(());
+    };
     let svc = parse_service(&service)?;
     let instances = if let Some(name) = instance {
         probe::probe_instance(&name, &svc, &opts).await?
@@ -395,7 +400,20 @@ mod tests {
     fn cli_parses_probe_with_service() {
         let c = Cli::try_parse_from(["whodis", "probe", "_airplay._tcp.local."]).expect("parse");
         match c.command {
-            Cmd::Probe { service, .. } => assert_eq!(service, "_airplay._tcp.local."),
+            Cmd::Probe { service, .. } => assert_eq!(service.as_deref(), Some("_airplay._tcp.local.")),
+            other => panic!("expected Probe, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[allow(
+        clippy::panic,
+        reason = "test assertion intentionally panics on wrong variant"
+    )]
+    fn cli_parses_probe_without_service() {
+        let c = Cli::try_parse_from(["whodis", "probe"]).expect("parse");
+        match c.command {
+            Cmd::Probe { service, .. } => assert!(service.is_none()),
             other => panic!("expected Probe, got {other:?}"),
         }
     }

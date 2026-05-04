@@ -6,6 +6,7 @@ use std::io::{self, IsTerminal, Write};
 use serde::Serialize;
 
 use crate::browse::Event;
+use crate::probe::ServiceTypeSummary;
 use crate::types::{Device, Fingerprint, Instance};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,6 +62,29 @@ struct BrowseRecord<'a> {
     event: &'a Event,
     #[serde(skip_serializing_if = "Option::is_none")]
     fingerprint: Option<&'a Fingerprint>,
+}
+
+pub(crate) fn emit_service_type_summaries(
+    renderer: Renderer,
+    summaries: &[ServiceTypeSummary],
+) -> io::Result<()> {
+    match renderer {
+        Renderer::Jsonl => {
+            for s in summaries {
+                emit_jsonl(s)?;
+            }
+            Ok(())
+        }
+        Renderer::Pretty(_) => {
+            let mut out = io::stdout().lock();
+            let width = summaries.iter().map(|s| s.fqdn.len()).max().unwrap_or(0);
+            for s in summaries {
+                let plural = if s.instance_count == 1 { "instance" } else { "instances" };
+                writeln!(out, "  {:<width$}   {} {}", s.fqdn, s.instance_count, plural)?;
+            }
+            Ok(())
+        }
+    }
 }
 
 pub(crate) fn emit_instance(

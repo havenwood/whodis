@@ -38,13 +38,14 @@ whodis browse | jq -c 'select(.kind == "instance_found")'
 
 ## Probe
 
-Sends a directed query, collects answers for `--timeout` (default 3s), exits.
+Sends a directed query, collects answers for `--timeout` (default 3s), exits. Without a service type, lists what is on the LAN.
 
 ```
+whodis probe                                                     # discover service types and counts
 whodis probe _airplay._tcp.local.                                # all AirPlay receivers
 whodis probe _ipp._tcp.local. -t 5                               # printers, 5s window
 whodis probe _airplay._tcp.local. --instance "Living Room ATV"   # single instance
-whodis probe _services._dns-sd._udp.local.                       # service-type meta-query
+whodis probe --host BedroomTV.local                              # resolve a hostname
 ```
 
 ## Spoof
