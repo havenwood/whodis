@@ -30,6 +30,7 @@ cargo install --path .
 | `clone`   | Capture a real instance to a TOML answer table |
 | `flood`   | Goodbye and conflict-rename floods |
 | `report`  | Markdown engagement report |
+| `arp`     | Read ARP/NDP caches, show neighbors with OUI vendor lookup |
 
 ## Browse
 
@@ -62,6 +63,20 @@ whodis enum
 whodis enum OfficePrinter.local.
 whodis enum 192-168-50-179.local. -t 8
 ```
+
+## Arp
+
+Read the kernel's ARP and NDP neighbor caches. No packets sent. Cache only contains hosts your Mac has recently talked to, so a fresh cache after reboot may be sparse.
+
+```
+whodis arp                   # all IPv4 + IPv6 neighbors with OUI vendor
+whodis arp --v4              # IPv4 only
+whodis arp --v6              # IPv6 only
+whodis arp --vendor "Apple"  # substring match on vendor name (case-insensitive)
+whodis arp --no-oui          # skip vendor lookup
+```
+
+`-i NAME` filters to a specific interface. `--scope FILE` applies `allow_subnet` to filter entries to the engagement subnet. Use `--pretty` for a table layout.
 
 ## Capture
 

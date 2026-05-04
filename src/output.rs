@@ -8,7 +8,7 @@ use serde::Serialize;
 use crate::browse::Event;
 use crate::probe::{HostEnumeration, HostSummary, ServiceTypeSummary};
 use crate::types::HostAnswer;
-use crate::types::{Device, Fingerprint, Instance};
+use crate::types::{Device, Fingerprint, Instance, NeighborEntry};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ColorMode {
@@ -348,6 +348,60 @@ fn emit_host_enumeration_pretty(color: ColorMode, e: &HostEnumeration) -> io::Re
                 writeln!(out, "    txt       {txt}")?;
             }
         }
+    }
+    Ok(())
+}
+
+pub(crate) fn emit_neighbor_entries(
+    renderer: Renderer,
+    entries: &[NeighborEntry],
+) -> io::Result<()> {
+    match renderer {
+        Renderer::Jsonl => {
+            for e in entries {
+                emit_jsonl(e)?;
+            }
+            Ok(())
+        }
+        Renderer::Pretty(c) => emit_neighbors_pretty(c, entries),
+    }
+}
+
+#[allow(
+    clippy::print_stdout,
+    reason = "output.rs is the designated CLI stdout sink"
+)]
+fn emit_neighbors_pretty(color: ColorMode, entries: &[NeighborEntry]) -> io::Result<()> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    let on = color.enabled();
+    let mut out = io::stdout().lock();
+
+    // Column widths
+    let iface_w = entries.iter().map(|e| e.interface.len()).max().unwrap_or(5);
+    let ip_w = entries
+        .iter()
+        .map(|e| e.ip.to_string().len())
+        .max()
+        .unwrap_or(15);
+    let mac_w = 17; // xx:xx:xx:xx:xx:xx is always 17 chars
+
+    for e in entries {
+        let [o0, o1, o2, o3, o4, o5] = e.mac;
+        let mac_str = format!("{o0:02x}:{o1:02x}:{o2:02x}:{o3:02x}:{o4:02x}:{o5:02x}");
+        let vendor = e.vendor.as_deref().unwrap_or("-");
+        writeln!(
+            out,
+            "  {:<iface_w$}  {:<ip_w$}  {}  {}",
+            paint(on, &e.interface, BOLD),
+            e.ip,
+            mac_str,
+            vendor,
+            iface_w = iface_w,
+            ip_w = ip_w,
+        )?;
+        let _ = mac_w;
     }
     Ok(())
 }

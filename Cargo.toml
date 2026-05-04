@@ -18,7 +18,7 @@ name = "whodis"
 path = "src/bin/whodis.rs"
 
 [dependencies]
-tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal", "io-util"] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal", "io-util", "process"] }
 tokio-util = { version = "0.7.18", features = ["rt"] }
 tokio-stream = "0.1.18"
 time = { version = "0.3.47", features = ["formatting", "local-offset", "macros"] }

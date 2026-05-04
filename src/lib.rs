@@ -4,6 +4,7 @@
 
 #![doc(html_root_url = "https://docs.rs/whodis")]
 
+pub mod arp;
 mod auth;
 mod capture;
 mod cli;
@@ -12,6 +13,7 @@ mod error;
 mod hickory_compat;
 mod mode;
 mod name_util;
+mod oui;
 mod output;
 mod relay;
 mod report;
@@ -32,4 +34,4 @@ pub use auth::Authorization;
 pub use cli::{Cli, Cmd, FloodCmd, run};
 pub use error::{Error, Result};
 pub use mode::{MDNS_GROUP_V4, MDNS_GROUP_V6, MDNS_PORT, Mode};
-pub use types::{Device, Fingerprint, HostAnswer, Instance, Protocol, ServiceType};
+pub use types::{Device, Fingerprint, HostAnswer, Instance, NeighborEntry, Protocol, ServiceType};

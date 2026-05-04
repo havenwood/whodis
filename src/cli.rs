@@ -14,7 +14,8 @@ use crate::error::Result as WhResult;
 use crate::flood::{self, FloodOptions};
 use crate::mode::Mode;
 use crate::output::{
-    ColorMode, Renderer, emit_browse_event, emit_host_answers, emit_host_enumeration, emit_instance,
+    ColorMode, Renderer, emit_browse_event, emit_host_answers, emit_host_enumeration,
+    emit_instance, emit_neighbor_entries,
 };
 use crate::probe::{self, ProbeOptions};
 use crate::spoof_template::{self, Template};
@@ -199,6 +200,25 @@ pub enum Cmd {
         #[arg(short = 't', long, default_value_t = 10)]
         timeout: u64,
     },
+
+    /// Read the kernel ARP/NDP caches and show neighbors with OUI vendor lookup.
+    Arp {
+        /// Show only IPv4 neighbors.
+        #[arg(long)]
+        v4: bool,
+
+        /// Show only IPv6 neighbors.
+        #[arg(long)]
+        v6: bool,
+
+        /// Case-insensitive substring match on vendor name.
+        #[arg(long, value_name = "VENDOR")]
+        vendor: Option<String>,
+
+        /// Skip OUI vendor lookup.
+        #[arg(long)]
+        no_oui: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -371,6 +391,12 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             let count = crate::report::write(&out, timeout).await?;
             tracing::info!(instances = count, file = %out.display(), "report written");
         }
+        Cmd::Arp {
+            v4,
+            v6,
+            vendor,
+            no_oui,
+        } => run_arp(renderer, scope, v4, v6, vendor, no_oui).await?,
     }
     Ok(())
 }
@@ -652,6 +678,64 @@ fn build_auth(allow_instance: Vec<String>, scope: Option<crate::scope::Scope>) -
     }
 }
 
+async fn run_arp(
+    renderer: Renderer,
+    scope: Option<crate::scope::Scope>,
+    v4: bool,
+    v6: bool,
+    vendor_filter: Option<String>,
+    no_oui: bool,
+) -> anyhow::Result<()> {
+    use std::net::IpAddr;
+
+    let auth = scope.map(|s| s.into_auth(Vec::new(), Vec::new()));
+
+    let mut entries = crate::arp::read_neighbors().await?;
+
+    // Family filter: if neither flag is set, show both
+    let filter_v4 = v4 && !v6;
+    let filter_v6 = v6 && !v4;
+    if filter_v4 {
+        entries.retain(|e| matches!(e.ip, IpAddr::V4(_)));
+    } else if filter_v6 {
+        entries.retain(|e| matches!(e.ip, IpAddr::V6(_)));
+    }
+
+    // Scope / authorization filter
+    if let Some(ref a) = auth {
+        entries.retain(|e| a.permits_addr(e.ip));
+    }
+
+    // Interface filter (already applied globally; this is belt-and-suspenders for completeness)
+
+    // OUI vendor lookup
+    if !no_oui {
+        for e in &mut entries {
+            e.vendor = crate::oui::lookup(e.mac).map(str::to_owned);
+        }
+    }
+
+    // Vendor name substring filter
+    if let Some(ref pattern) = vendor_filter {
+        let pat = pattern.to_ascii_lowercase();
+        entries.retain(|e| {
+            e.vendor
+                .as_deref()
+                .is_some_and(|v| v.to_ascii_lowercase().contains(&pat))
+        });
+    }
+
+    // Sort by interface then IP
+    entries.sort_by(|a, b| {
+        a.interface
+            .cmp(&b.interface)
+            .then_with(|| a.ip.to_string().cmp(&b.ip.to_string()))
+    });
+
+    emit_neighbor_entries(renderer, &entries)?;
+    Ok(())
+}
+
 fn parse_service(s: &str) -> WhResult<ServiceType> {
     let trimmed = s.trim_end_matches('.').trim_end_matches(".local");
     let parts: Vec<&str> = trimmed.split('.').collect();
@@ -806,6 +890,45 @@ mod tests {
     #[test]
     fn debug_assert_clap_command_renders() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    #[allow(
+        clippy::panic,
+        reason = "test assertion intentionally panics on wrong variant"
+    )]
+    fn cli_parses_arp_subcommand() {
+        let c = Cli::try_parse_from(["whodis", "arp"]).expect("parse");
+        match c.command {
+            Cmd::Arp {
+                v4,
+                v6,
+                vendor,
+                no_oui,
+            } => {
+                assert!(!v4);
+                assert!(!v6);
+                assert!(vendor.is_none());
+                assert!(!no_oui);
+            }
+            other => panic!("expected Arp, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[allow(
+        clippy::panic,
+        reason = "test assertion intentionally panics on wrong variant"
+    )]
+    fn cli_parses_arp_with_vendor_filter() {
+        let c = Cli::try_parse_from(["whodis", "arp", "--vendor", "Apple", "--v4"]).expect("parse");
+        match c.command {
+            Cmd::Arp { v4, vendor, .. } => {
+                assert!(v4);
+                assert_eq!(vendor.as_deref(), Some("Apple"));
+            }
+            other => panic!("expected Arp, got {other:?}"),
+        }
     }
 
     #[test]

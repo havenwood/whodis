@@ -6,6 +6,49 @@ use std::net::IpAddr;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde serialize_with requires &T signature"
+)]
+fn serialize_mac<S: serde::Serializer>(mac: &[u8; 6], ser: S) -> Result<S::Ok, S::Error> {
+    let [o0, o1, o2, o3, o4, o5] = mac;
+    let s = format!("{o0:02x}:{o1:02x}:{o2:02x}:{o3:02x}:{o4:02x}:{o5:02x}");
+    ser.serialize_str(&s)
+}
+
+fn deserialize_mac<'de, D: serde::Deserializer<'de>>(de: D) -> Result<[u8; 6], D::Error> {
+    use serde::de::Error as _;
+    let s = String::deserialize(de)?;
+    let mut it = s.split(':');
+    let parse_octet = |p: Option<&str>| -> Result<u8, D::Error> {
+        let part = p.ok_or_else(|| D::Error::custom("expected 6 colon-separated hex octets"))?;
+        u8::from_str_radix(part, 16)
+            .map_err(|_| D::Error::custom(format!("invalid hex octet: {part}")))
+    };
+    let mac = [
+        parse_octet(it.next())?,
+        parse_octet(it.next())?,
+        parse_octet(it.next())?,
+        parse_octet(it.next())?,
+        parse_octet(it.next())?,
+        parse_octet(it.next())?,
+    ];
+    if it.next().is_some() {
+        return Err(D::Error::custom("too many octets in MAC address"));
+    }
+    Ok(mac)
+}
+
+/// A single ARP or NDP neighbor cache entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NeighborEntry {
+    pub ip: IpAddr,
+    #[serde(serialize_with = "serialize_mac", deserialize_with = "deserialize_mac")]
+    pub mac: [u8; 6],
+    pub vendor: Option<String>,
+    pub interface: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Protocol {
