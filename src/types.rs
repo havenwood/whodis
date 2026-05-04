@@ -39,6 +39,55 @@ fn deserialize_mac<'de, D: serde::Deserializer<'de>>(de: D) -> Result<[u8; 6], D
     Ok(mac)
 }
 
+/// Serialize `Option<Duration>` as `Option<f64>` milliseconds.
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    clippy::ref_option,
+    reason = "serde serialize_with requires fn(&T, S) where T is the field type"
+)]
+fn serialize_rtt_ms<S: serde::Serializer>(
+    rtt: &Option<std::time::Duration>,
+    ser: S,
+) -> Result<S::Ok, S::Error> {
+    match rtt {
+        Some(d) => ser.serialize_some(&(d.as_secs_f64() * 1000.0)),
+        None => ser.serialize_none(),
+    }
+}
+
+/// Result of a single sweep probe, enriched with ARP neighbor data.
+#[derive(Debug, Clone, Serialize)]
+pub struct SweepResult {
+    pub ip: IpAddr,
+    pub alive: bool,
+    #[serde(serialize_with = "serialize_rtt_ms")]
+    pub rtt_ms: Option<std::time::Duration>,
+    #[serde(
+        serialize_with = "serialize_mac_opt",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub mac: Option<[u8; 6]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vendor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interface: Option<String>,
+}
+
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    clippy::ref_option,
+    reason = "serde serialize_with requires fn(&T, S) where T is the field type"
+)]
+fn serialize_mac_opt<S: serde::Serializer>(
+    mac: &Option<[u8; 6]>,
+    ser: S,
+) -> Result<S::Ok, S::Error> {
+    match mac {
+        Some(m) => serialize_mac(m, ser),
+        None => ser.serialize_none(),
+    }
+}
+
 /// A single ARP or NDP neighbor cache entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NeighborEntry {

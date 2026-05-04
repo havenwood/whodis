@@ -4,6 +4,7 @@ mDNS / Bonjour recon and spoof, in Rust. macOS first.
 
 ```
 whodis browse --fingerprint
+whodis sweep 10.0.5.0/24
 whodis capture --pcap snap.pcap -t 60
 whodis probe
 whodis enum OfficePrinter.local.
@@ -25,12 +26,13 @@ cargo install --path .
 | `browse`  | Stream every mDNS event from the LAN |
 | `probe`   | Directed query, or service-type list with no args |
 | `enum`    | Per-host service deep dive, or host list with no args |
+| `arp`     | Read ARP/NDP caches with OUI vendor lookup |
+| `sweep`   | Active ICMP host discovery, no root required |
 | `capture` | Dump mDNS to a pcap file |
 | `spoof`   | Authoritative responder, optionally with a TCP relay |
 | `clone`   | Capture a real instance to a TOML answer table |
 | `flood`   | Goodbye and conflict-rename floods |
 | `report`  | Markdown engagement report |
-| `arp`     | Read ARP/NDP caches, show neighbors with OUI vendor lookup |
 
 ## Browse
 
@@ -69,14 +71,30 @@ whodis enum 192-168-50-179.local. -t 8
 Read the kernel's ARP and NDP neighbor caches. No packets sent. Cache only contains hosts your Mac has recently talked to, so a fresh cache after reboot may be sparse.
 
 ```
-whodis arp                   # all IPv4 + IPv6 neighbors with OUI vendor
-whodis arp --v4              # IPv4 only
-whodis arp --v6              # IPv6 only
-whodis arp --vendor "Apple"  # substring match on vendor name (case-insensitive)
-whodis arp --no-oui          # skip vendor lookup
+whodis arp
+whodis arp --v4
+whodis arp --v6
+whodis arp --vendor "Apple"
+whodis arp --no-oui
 ```
 
-`-i NAME` filters to a specific interface. `--scope FILE` applies `allow_subnet` to filter entries to the engagement subnet. Use `--pretty` for a table layout.
+`--vendor` is a case-insensitive substring match. `-i NAME` filters to a specific interface. `--scope FILE` applies `allow_subnet` to limit entries to the engagement subnet.
+
+## Sweep
+
+Active IPv4 host discovery via ICMP echo. Uses `SOCK_DGRAM + IPPROTO_ICMP`, which macOS allows unprivileged - no sudo required. After probing, the kernel's ARP cache is freshly populated; whodis reads it once to enrich live hosts with MAC and OUI vendor.
+
+```
+whodis sweep 192.168.1.0/24
+whodis sweep 192.168.1.0/24 -t 500          # per-probe timeout in ms (default 500)
+whodis sweep 192.168.1.0/24 --max 64        # cap concurrent probes (default 256)
+whodis sweep 192.168.1.0/24 --max 0         # unbounded concurrency (watch fd limits)
+whodis sweep 192.168.1.0/24 --no-arp        # skip MAC/vendor enrichment
+whodis sweep 192.168.1.0/24 --no-oui        # keep MAC, skip OUI vendor lookup
+whodis sweep 192.168.1.0/24 --show-dead     # also emit unreachable hosts
+```
+
+Default `--max 256` guards against file descriptor exhaustion (macOS default `ulimit -n` is 256). IPv4 only in v1. Output is one record per host (`ip`, `alive`, `rtt_ms`, `mac`, `vendor`, `interface`); dead hosts omitted unless `--show-dead`. `--scope FILE` applies `allow_subnet` to skip IPs outside the engagement range.
 
 ## Capture
 
@@ -212,6 +230,8 @@ JSONL on stdout by default. `--pretty` switches to human view (auto on a TTY). `
 
 `spoof` accepts `--allow CIDR` and `--allow-instance NAME`. `flood` accepts `--allow-instance NAME` only (it multicasts, no per-target IP). Both are repeatable. An empty allow-list emits one warning and proceeds. A mismatched allow-list logs the blocked target and exits non-zero.
 
+`sweep` and `arp` honor a scope file's `allow_subnet`: `sweep` intersects the requested CIDR with the allow-list (probing only inside it), `arp` filters cache entries to addresses inside it. Without a scope, `sweep` warns once before probing.
+
 Declare engagement scope once and reuse:
 
 ```toml
@@ -235,6 +255,8 @@ Set scope, capture in the background, spoof + flood the target, watch the LAN, t
 ```sh
 mkdir -p engagement-logs
 export WHODIS_SCOPE=whodis-scope.toml
+
+whodis sweep 10.0.5.0/24 > engagement-logs/hosts.jsonl
 
 whodis capture --pcap engagement-logs/mdns.pcap &
 whodis spoof --template airplay --name ConferenceSpeaker --ip 10.0.5.50 \

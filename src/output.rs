@@ -8,7 +8,7 @@ use serde::Serialize;
 use crate::browse::Event;
 use crate::probe::{HostEnumeration, HostSummary, ServiceTypeSummary};
 use crate::types::HostAnswer;
-use crate::types::{Device, Fingerprint, Instance, NeighborEntry};
+use crate::types::{Device, Fingerprint, Instance, NeighborEntry, SweepResult};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ColorMode {
@@ -402,6 +402,74 @@ fn emit_neighbors_pretty(color: ColorMode, entries: &[NeighborEntry]) -> io::Res
             ip_w = ip_w,
         )?;
         let _ = mac_w;
+    }
+    Ok(())
+}
+
+pub(crate) fn emit_sweep_results(renderer: Renderer, results: &[SweepResult]) -> io::Result<()> {
+    match renderer {
+        Renderer::Jsonl => {
+            for r in results {
+                emit_jsonl(r)?;
+            }
+            Ok(())
+        }
+        Renderer::Pretty(c) => emit_sweep_pretty(c, results),
+    }
+}
+
+#[allow(
+    clippy::print_stdout,
+    reason = "output.rs is the designated CLI stdout sink"
+)]
+fn emit_sweep_pretty(color: ColorMode, results: &[SweepResult]) -> io::Result<()> {
+    if results.is_empty() {
+        return Ok(());
+    }
+    let on = color.enabled();
+    let mut out = io::stdout().lock();
+
+    // Sort by IP numerically.
+    let mut sorted: Vec<&SweepResult> = results.iter().collect();
+    sorted.sort_by_key(|r| match r.ip {
+        std::net::IpAddr::V4(v4) => v4.octets(),
+        std::net::IpAddr::V6(_) => [0u8; 4],
+    });
+
+    let ip_w = sorted
+        .iter()
+        .map(|r| r.ip.to_string().len())
+        .max()
+        .unwrap_or(15);
+
+    for r in sorted {
+        let status = if r.alive {
+            paint(on, "up", GREEN)
+        } else {
+            paint(on, "down", RED)
+        };
+        let rtt = r.rtt_ms.map_or_else(
+            || "-".to_string(),
+            |d| format!("{:.1}ms", d.as_secs_f64() * 1000.0),
+        );
+        let mac = r.mac.map_or_else(
+            || "-".to_string(),
+            |m| {
+                let [o0, o1, o2, o3, o4, o5] = m;
+                format!("{o0:02x}:{o1:02x}:{o2:02x}:{o3:02x}:{o4:02x}:{o5:02x}")
+            },
+        );
+        let vendor = r.vendor.as_deref().unwrap_or("-");
+        writeln!(
+            out,
+            "  {:<ip_w$}  {:<4}  {:<9}  {:<17}  {}",
+            r.ip,
+            status,
+            rtt,
+            mac,
+            vendor,
+            ip_w = ip_w,
+        )?;
     }
     Ok(())
 }

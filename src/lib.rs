@@ -23,6 +23,7 @@ mod transport;
 mod types;
 
 pub mod spoof_template;
+pub mod sweep;
 
 pub mod browse;
 pub mod fingerprint;
@@ -34,4 +35,7 @@ pub use auth::Authorization;
 pub use cli::{Cli, Cmd, FloodCmd, run};
 pub use error::{Error, Result};
 pub use mode::{MDNS_GROUP_V4, MDNS_GROUP_V6, MDNS_PORT, Mode};
-pub use types::{Device, Fingerprint, HostAnswer, Instance, NeighborEntry, Protocol, ServiceType};
+pub use sweep::{SweepOptions, SweepProbe};
+pub use types::{
+    Device, Fingerprint, HostAnswer, Instance, NeighborEntry, Protocol, ServiceType, SweepResult,
+};

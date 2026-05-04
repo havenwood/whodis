@@ -15,7 +15,7 @@ use crate::flood::{self, FloodOptions};
 use crate::mode::Mode;
 use crate::output::{
     ColorMode, Renderer, emit_browse_event, emit_host_answers, emit_host_enumeration,
-    emit_instance, emit_neighbor_entries,
+    emit_instance, emit_neighbor_entries, emit_sweep_results,
 };
 use crate::probe::{self, ProbeOptions};
 use crate::spoof_template::{self, Template};
@@ -219,6 +219,32 @@ pub enum Cmd {
         #[arg(long)]
         no_oui: bool,
     },
+
+    /// Sweep a CIDR block with ICMP echo to discover live IPv4 hosts. No root required.
+    Sweep {
+        /// CIDR block to sweep (IPv4 only), e.g. `192.168.1.0/24`.
+        cidr: ipnet::Ipv4Net,
+
+        /// Per-probe timeout in milliseconds.
+        #[arg(short = 't', long, default_value_t = 500)]
+        timeout: u64,
+
+        /// Maximum concurrent probes. 0 means unbounded (advanced; watch fd limits).
+        #[arg(long, default_value_t = 256)]
+        max: usize,
+
+        /// Skip MAC / vendor enrichment from ARP cache.
+        #[arg(long)]
+        no_arp: bool,
+
+        /// Keep MAC enrichment but skip OUI vendor lookup.
+        #[arg(long)]
+        no_oui: bool,
+
+        /// Also emit records for unreachable (dead) hosts.
+        #[arg(long)]
+        show_dead: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -397,6 +423,19 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             vendor,
             no_oui,
         } => run_arp(renderer, scope, v4, v6, vendor, no_oui).await?,
+        Cmd::Sweep {
+            cidr,
+            timeout,
+            max,
+            no_arp,
+            no_oui,
+            show_dead,
+        } => {
+            run_sweep(
+                renderer, scope, cidr, timeout, max, no_arp, no_oui, show_dead,
+            )
+            .await?;
+        }
     }
     Ok(())
 }
@@ -736,6 +775,101 @@ async fn run_arp(
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "all args map 1:1 to CLI flags; splitting into a struct would obscure the relationship"
+)]
+async fn run_sweep(
+    renderer: Renderer,
+    scope: Option<crate::scope::Scope>,
+    cidr: ipnet::Ipv4Net,
+    timeout_ms: u64,
+    max: usize,
+    no_arp: bool,
+    no_oui: bool,
+    show_dead: bool,
+) -> anyhow::Result<()> {
+    use std::collections::HashMap;
+    use std::net::IpAddr;
+
+    let auth = scope.map(|s| s.into_auth(Vec::new(), Vec::new()));
+
+    // Warn if no scope is set (sweep is an active operation).
+    let permissive = auth.as_ref().is_none_or(Authorization::is_permissive);
+    if permissive {
+        tracing::warn!(
+            "sweeping without an engagement scope - confirm authorization. \
+             pass --scope FILE or set WHODIS_SCOPE to declare targets."
+        );
+    }
+
+    let opts = crate::sweep::SweepOptions {
+        timeout: Duration::from_millis(timeout_ms),
+        max_concurrent: max,
+    };
+
+    let probes = crate::sweep::sweep(cidr, opts).await?;
+
+    // ARP enrichment: read neighbors once, build a lookup map.
+    let neighbor_map: HashMap<IpAddr, crate::types::NeighborEntry> = if no_arp {
+        HashMap::new()
+    } else {
+        let mut entries = crate::arp::read_neighbors().await?;
+        if !no_oui {
+            for e in &mut entries {
+                e.vendor = crate::oui::lookup(e.mac).map(str::to_owned);
+            }
+        }
+        entries.into_iter().map(|e| (e.ip, e)).collect()
+    };
+
+    // Build SweepResult records.
+    let mut results: Vec<crate::types::SweepResult> = probes
+        .into_iter()
+        .filter_map(|probe| {
+            let ip = IpAddr::V4(probe.ip);
+
+            // Apply scope filter.
+            if let Some(ref a) = auth
+                && !a.permits_addr(ip)
+            {
+                return None;
+            }
+
+            if !probe.alive && !show_dead {
+                return None;
+            }
+
+            let neighbor = neighbor_map.get(&ip);
+            let (mac, vendor, interface) = if probe.alive {
+                neighbor.map_or((None, None, None), |n| {
+                    (Some(n.mac), n.vendor.clone(), Some(n.interface.clone()))
+                })
+            } else {
+                (None, None, None)
+            };
+
+            Some(crate::types::SweepResult {
+                ip,
+                alive: probe.alive,
+                rtt_ms: probe.rtt,
+                mac,
+                vendor,
+                interface,
+            })
+        })
+        .collect();
+
+    // Sort by IP numerically.
+    results.sort_by_key(|r| match r.ip {
+        IpAddr::V4(v4) => u32::from(v4),
+        IpAddr::V6(_) => 0,
+    });
+
+    emit_sweep_results(renderer, &results)?;
+    Ok(())
+}
+
 fn parse_service(s: &str) -> WhResult<ServiceType> {
     let trimmed = s.trim_end_matches('.').trim_end_matches(".local");
     let parts: Vec<&str> = trimmed.split('.').collect();
@@ -928,6 +1062,61 @@ mod tests {
                 assert_eq!(vendor.as_deref(), Some("Apple"));
             }
             other => panic!("expected Arp, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[allow(
+        clippy::panic,
+        reason = "test assertion intentionally panics on wrong variant"
+    )]
+    fn cli_parses_sweep_subcommand() {
+        let c = Cli::try_parse_from(["whodis", "sweep", "192.168.1.0/24"]).expect("parse");
+        match c.command {
+            Cmd::Sweep {
+                cidr,
+                timeout,
+                max,
+                no_arp,
+                no_oui,
+                show_dead,
+            } => {
+                assert_eq!(cidr.to_string(), "192.168.1.0/24");
+                assert_eq!(timeout, 500);
+                assert_eq!(max, 256);
+                assert!(!no_arp);
+                assert!(!no_oui);
+                assert!(!show_dead);
+            }
+            other => panic!("expected Sweep, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[allow(
+        clippy::panic,
+        reason = "test assertion intentionally panics on wrong variant"
+    )]
+    fn cli_parses_sweep_with_max_zero_for_unbounded() {
+        let c =
+            Cli::try_parse_from(["whodis", "sweep", "10.0.0.0/24", "--max", "0"]).expect("parse");
+        match c.command {
+            Cmd::Sweep { max, .. } => assert_eq!(max, 0),
+            other => panic!("expected Sweep, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[allow(
+        clippy::panic,
+        reason = "test assertion intentionally panics on wrong variant"
+    )]
+    fn cli_parses_sweep_with_show_dead() {
+        let c =
+            Cli::try_parse_from(["whodis", "sweep", "10.0.0.0/30", "--show-dead"]).expect("parse");
+        match c.command {
+            Cmd::Sweep { show_dead, .. } => assert!(show_dead),
+            other => panic!("expected Sweep, got {other:?}"),
         }
     }
 
