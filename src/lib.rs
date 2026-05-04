@@ -9,6 +9,7 @@ mod capture;
 mod cli;
 mod clone;
 mod error;
+mod hickory_compat;
 mod mode;
 mod name_util;
 mod output;

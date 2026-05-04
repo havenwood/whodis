@@ -4,13 +4,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use hickory_proto::op::{Message, MessageType, ResponseCode};
+use hickory_proto::op::{Message, MessageType, OpCode, ResponseCode};
 use hickory_proto::rr::{DNSClass, Name, RData, Record, RecordType};
 use hickory_proto::serialize::binary::{BinDecodable, BinEncodable};
 use tokio_util::sync::CancellationToken;
 
 use crate::auth::Authorization;
 use crate::error::{Error, Result};
+use crate::hickory_compat::{MessageExt, RecordExt, SrvExt};
 use crate::mode::Mode;
 use crate::transport::{Destination, Transport};
 
@@ -114,7 +115,7 @@ impl AnswerTableBuilder {
         let mut map: HashMap<(String, RecordType), ResponseEntry> =
             HashMap::with_capacity(entries.len());
         for e in &entries {
-            let mut msg = Message::new();
+            let mut msg = Message::new(0, MessageType::Query, OpCode::Query);
             msg.set_message_type(MessageType::Response)
                 .set_authoritative(true)
                 .set_response_code(ResponseCode::NoError);

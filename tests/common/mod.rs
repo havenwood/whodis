@@ -6,7 +6,7 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::time::Duration;
 
-use hickory_proto::op::{Message, MessageType, ResponseCode};
+use hickory_proto::op::{Message, MessageType, OpCode, ResponseCode};
 use hickory_proto::rr::rdata::{A, PTR, SRV, TXT};
 use hickory_proto::rr::{DNSClass, Name, RData, Record, RecordType};
 use hickory_proto::serialize::binary::BinEncodable;
@@ -70,20 +70,20 @@ pub(crate) fn send_fake_appletv_announcement() {
     let svc_type = Name::from_utf8("_pentest-test._tcp.local.").expect("svc type name");
     let host = Name::from_utf8("FakeATV.local.").expect("host name");
 
-    let mut msg = Message::new();
-    msg.set_message_type(MessageType::Response)
-        .set_authoritative(true)
-        .set_response_code(ResponseCode::NoError);
+    let mut msg = Message::new(0, MessageType::Query, OpCode::Query);
+    msg.metadata.message_type = MessageType::Response;
+    msg.metadata.authoritative = true;
+    msg.metadata.response_code = ResponseCode::NoError;
 
     // PTR: _pentest-test._tcp.local. -> FakeATV._pentest-test._tcp.local.
     let mut ptr_rec = Record::from_rdata(svc_type, 60, RData::PTR(PTR(instance.clone())));
-    ptr_rec.set_dns_class(DNSClass::IN);
+    ptr_rec.dns_class = DNSClass::IN;
     msg.add_answer(ptr_rec);
 
     // SRV: FakeATV._pentest-test._tcp.local. -> FakeATV.local.:7000
     let mut srv_rec =
         Record::from_rdata(instance.clone(), 60, RData::SRV(SRV::new(0, 0, 7000, host)));
-    srv_rec.set_dns_class(DNSClass::IN);
+    srv_rec.dns_class = DNSClass::IN;
     msg.add_answer(srv_rec);
 
     // TXT: FakeATV._pentest-test._tcp.local. model=AppleTV11,1
@@ -92,7 +92,7 @@ pub(crate) fn send_fake_appletv_announcement() {
         60,
         RData::TXT(TXT::new(vec!["model=AppleTV11,1".to_string()])),
     );
-    txt_rec.set_dns_class(DNSClass::IN);
+    txt_rec.dns_class = DNSClass::IN;
     msg.add_answer(txt_rec);
 
     let bytes = msg.to_bytes().expect("encode");
@@ -108,14 +108,14 @@ pub(crate) fn send_fake_appletv_goodbye() {
     let instance = Name::from_utf8("FakeATV._pentest-test._tcp.local.").expect("instance name");
     let svc_type = Name::from_utf8("_pentest-test._tcp.local.").expect("svc type name");
 
-    let mut msg = Message::new();
-    msg.set_message_type(MessageType::Response)
-        .set_authoritative(true)
-        .set_response_code(ResponseCode::NoError);
+    let mut msg = Message::new(0, MessageType::Query, OpCode::Query);
+    msg.metadata.message_type = MessageType::Response;
+    msg.metadata.authoritative = true;
+    msg.metadata.response_code = ResponseCode::NoError;
 
     // PTR with TTL=0 signals goodbye
     let mut ptr_rec = Record::from_rdata(svc_type, 0, RData::PTR(PTR(instance)));
-    ptr_rec.set_dns_class(DNSClass::IN);
+    ptr_rec.dns_class = DNSClass::IN;
     msg.add_answer(ptr_rec);
 
     let bytes = msg.to_bytes().expect("encode");

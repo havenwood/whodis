@@ -16,6 +16,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::Result;
+use crate::hickory_compat::{MessageExt, RecordExt, SrvExt, TxtExt};
 use crate::mode::Mode;
 use crate::transport::{Destination, Transport};
 use crate::types::{Instance, Protocol, ServiceType};
@@ -125,7 +126,7 @@ async fn send_round(transport: &Transport, known: &DashMap<String, ServiceType>)
 fn build_query(name: &str, qtype: RecordType) -> Result<Vec<u8>> {
     let n =
         Name::from_utf8(name).map_err(|_| crate::Error::InvalidServiceType(name.to_string()))?;
-    let mut m = Message::new();
+    let mut m = Message::new(0, MessageType::Query, OpCode::Query);
     m.set_message_type(MessageType::Query)
         .set_op_code(OpCode::Query)
         .set_recursion_desired(false);

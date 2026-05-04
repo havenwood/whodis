@@ -4,13 +4,14 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use governor::{Quota, RateLimiter};
-use hickory_proto::op::{Message, MessageType, ResponseCode};
+use hickory_proto::op::{Message, MessageType, OpCode, ResponseCode};
 use hickory_proto::rr::rdata::{PTR, SRV, TXT};
 use hickory_proto::rr::{DNSClass, Name, RData, Record};
 use hickory_proto::serialize::binary::BinEncodable;
 
 use crate::auth::Authorization;
 use crate::error::{Error, Result};
+use crate::hickory_compat::{MessageExt, RecordExt};
 use crate::mode::Mode;
 use crate::transport::{Destination, Transport};
 
@@ -135,7 +136,7 @@ fn limiter(
 
 fn build_goodbye(fqdn: &str) -> Result<Vec<u8>> {
     let name = Name::from_utf8(fqdn).map_err(|_| Error::InvalidServiceType(fqdn.to_string()))?;
-    let mut msg = Message::new();
+    let mut msg = Message::new(0, MessageType::Query, OpCode::Query);
     msg.set_message_type(MessageType::Response)
         .set_authoritative(true)
         .set_response_code(ResponseCode::NoError);
@@ -149,7 +150,7 @@ fn build_goodbye(fqdn: &str) -> Result<Vec<u8>> {
     srv.set_dns_class(DNSClass::IN);
     msg.add_answer(srv);
 
-    let mut txt = Record::from_rdata(name, 0, RData::TXT(TXT::new(Vec::new())));
+    let mut txt = Record::from_rdata(name, 0, RData::TXT(TXT::new(vec![String::new()])));
     txt.set_dns_class(DNSClass::IN);
     msg.add_answer(txt);
 
@@ -158,7 +159,7 @@ fn build_goodbye(fqdn: &str) -> Result<Vec<u8>> {
 
 fn build_conflict(fqdn: &str) -> Result<Vec<u8>> {
     let name = Name::from_utf8(fqdn).map_err(|_| Error::InvalidServiceType(fqdn.to_string()))?;
-    let mut msg = Message::new();
+    let mut msg = Message::new(0, MessageType::Query, OpCode::Query);
     msg.set_message_type(MessageType::Response)
         .set_authoritative(true)
         .set_response_code(ResponseCode::NoError);
@@ -187,7 +188,7 @@ mod tests {
         let bytes = build_goodbye("Foo._airplay._tcp.local.").expect("build");
         let msg = hickory_proto::op::Message::from_bytes(&bytes).expect("parse");
         assert_eq!(msg.answers().len(), 3);
-        assert!(msg.authoritative());
+        assert!(msg.metadata.authoritative);
         for r in msg.answers() {
             assert_eq!(r.ttl(), 0);
         }
@@ -200,7 +201,7 @@ mod tests {
         let r = msg.answers().first().expect("answer");
         let is_srv_with_conflict = matches!(
             r.data(),
-            Some(hickory_proto::rr::RData::SRV(srv)) if srv.target().to_string().contains("whodis-conflict")
+            Some(hickory_proto::rr::RData::SRV(srv)) if srv.target.to_string().contains("whodis-conflict")
         );
         assert!(
             is_srv_with_conflict,

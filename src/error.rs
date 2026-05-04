@@ -8,7 +8,7 @@ pub enum Error {
     Transport(#[from] io::Error),
 
     #[error("dns: {0}")]
-    Dns(#[from] hickory_proto::error::ProtoError),
+    Dns(#[from] hickory_proto::ProtoError),
 
     #[error("authorization blocked op {op} for target {target}")]
     Authorization { op: &'static str, target: String },

@@ -12,6 +12,7 @@ use hickory_proto::serialize::binary::{BinDecodable, BinEncodable};
 use serde::Serialize;
 
 use crate::error::Result;
+use crate::hickory_compat::{MessageExt, RecordExt, SrvExt, TxtExt};
 use crate::mode::Mode;
 use crate::transport::{Destination, Transport};
 use crate::types::{HostAnswer, Instance, Protocol, ServiceType};
@@ -112,7 +113,7 @@ pub async fn discover_service_types(opts: &ProbeOptions) -> Result<Vec<ServiceTy
     }
 
     // Phase 2: ask for instance PTRs of every discovered type in one batch.
-    let mut q_msg = Message::new();
+    let mut q_msg = Message::new(0, MessageType::Query, OpCode::Query);
     q_msg
         .set_message_type(MessageType::Query)
         .set_op_code(OpCode::Query)
@@ -201,7 +202,7 @@ fn parse_name(s: &str) -> Result<Name> {
 }
 
 fn build_query(name: &Name, qtype: RecordType) -> Message {
-    let mut msg = Message::new();
+    let mut msg = Message::new(0, MessageType::Query, OpCode::Query);
     msg.set_message_type(MessageType::Query)
         .set_op_code(OpCode::Query)
         .set_recursion_desired(false);
@@ -212,7 +213,7 @@ fn build_query(name: &Name, qtype: RecordType) -> Message {
 }
 
 fn build_instance_queries(targets: &[String]) -> Result<Message> {
-    let mut msg = Message::new();
+    let mut msg = Message::new(0, MessageType::Query, OpCode::Query);
     msg.set_message_type(MessageType::Query)
         .set_op_code(OpCode::Query)
         .set_recursion_desired(false);
@@ -400,7 +401,7 @@ pub async fn enum_host(host: &str, opts: &ProbeOptions) -> Result<HostEnumeratio
     unique.dedup();
 
     // Phase 2: query PTR for every discovered type in one batch plus A/AAAA for host.
-    let mut q_msg = Message::new();
+    let mut q_msg = Message::new(0, MessageType::Query, OpCode::Query);
     q_msg
         .set_message_type(MessageType::Query)
         .set_op_code(OpCode::Query)

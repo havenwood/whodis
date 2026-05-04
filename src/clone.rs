@@ -10,6 +10,7 @@ use hickory_proto::rr::{DNSClass, RData, Record, RecordType};
 use hickory_proto::serialize::binary::{BinDecodable, BinEncodable};
 
 use crate::error::{Error, Result};
+use crate::hickory_compat::{MessageExt, RecordExt, SrvExt, TxtExt};
 use crate::mode::Mode;
 use crate::transport::{Destination, Transport};
 
@@ -135,7 +136,7 @@ pub(crate) async fn clone_instance(
     let transport = Transport::build(Mode::Listen)?;
 
     // Phase 1: send PTR for service + SRV/TXT for the specific instance.
-    let mut q1 = Message::new();
+    let mut q1 = Message::new(0, MessageType::Query, OpCode::Query);
     q1.set_message_type(MessageType::Query)
         .set_op_code(OpCode::Query)
         .set_recursion_desired(false);
@@ -158,7 +159,7 @@ pub(crate) async fn clone_instance(
 
     // Phase 2: if we learned a host from SRV, query A/AAAA for it.
     if let Some(host) = out.host.clone() {
-        let mut q2 = Message::new();
+        let mut q2 = Message::new(0, MessageType::Query, OpCode::Query);
         q2.set_message_type(MessageType::Query)
             .set_op_code(OpCode::Query)
             .set_recursion_desired(false);
