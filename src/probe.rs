@@ -36,6 +36,7 @@ pub async fn probe_service(service: &ServiceType, opts: &ProbeOptions) -> Result
     let transport = Transport::build(Mode::Listen)?;
     let qname = parse_name(&service.fqdn())?;
     let msg = build_query(&qname, RecordType::PTR);
+    let started = tokio::time::Instant::now();
     let first_window = opts.timeout / 2;
     let first_window = if first_window.is_zero() {
         opts.timeout
@@ -54,6 +55,7 @@ pub async fn probe_service(service: &ServiceType, opts: &ProbeOptions) -> Result
         let followup = build_instance_queries(&targets)?;
         records.extend(collect_records(&transport, &followup, second_window).await?);
     }
+    hydrate_host_records(&transport, &mut records, opts.timeout, started).await?;
     Ok(decode_instances(service, &records))
 }
 
@@ -69,10 +71,16 @@ pub async fn probe_instance(
     let mut txt_q = Query::query(qname, RecordType::TXT);
     txt_q.set_query_class(DNSClass::IN);
     msg.add_query(txt_q);
-    send_and_collect(&transport, &msg, opts.timeout, |records| {
-        decode_instances(service, records)
-    })
-    .await
+    let started = tokio::time::Instant::now();
+    let first_window = opts.timeout / 2;
+    let first_window = if first_window.is_zero() {
+        opts.timeout
+    } else {
+        first_window
+    };
+    let mut records = collect_records(&transport, &msg, first_window).await?;
+    hydrate_host_records(&transport, &mut records, opts.timeout, started).await?;
+    Ok(decode_instances(service, &records))
 }
 
 pub async fn probe_host(host: &str, opts: &ProbeOptions) -> Result<Vec<HostAnswer>> {
@@ -277,6 +285,42 @@ fn build_instance_queries(targets: &[String]) -> Result<Message> {
     Ok(msg)
 }
 
+fn build_host_queries(hosts: &[String]) -> Result<Message> {
+    let mut msg = Message::new(0, MessageType::Query, OpCode::Query);
+    msg.set_message_type(MessageType::Query)
+        .set_op_code(OpCode::Query)
+        .set_recursion_desired(false);
+    for host in hosts {
+        let name = parse_name(host)?;
+        let mut a_q = Query::query(name.clone(), RecordType::A);
+        a_q.set_query_class(DNSClass::IN);
+        msg.add_query(a_q);
+        let mut aaaa_q = Query::query(name, RecordType::AAAA);
+        aaaa_q.set_query_class(DNSClass::IN);
+        msg.add_query(aaaa_q);
+    }
+    Ok(msg)
+}
+
+async fn hydrate_host_records(
+    transport: &Transport,
+    records: &mut Vec<Record>,
+    total_timeout: Duration,
+    started: tokio::time::Instant,
+) -> Result<()> {
+    let hosts = hosts_missing_addrs(records);
+    if hosts.is_empty() {
+        return Ok(());
+    }
+    let remaining = total_timeout.saturating_sub(started.elapsed());
+    if remaining.is_zero() {
+        return Ok(());
+    }
+    let followup = build_host_queries(&hosts)?;
+    records.extend(collect_records(transport, &followup, remaining).await?);
+    Ok(())
+}
+
 async fn send_and_collect<T, F>(
     transport: &Transport,
     msg: &Message,
@@ -346,25 +390,74 @@ fn decode_ptr_targets(owner: &str, records: &[Record]) -> Vec<String> {
     targets
 }
 
+fn hosts_missing_addrs(records: &[Record]) -> Vec<String> {
+    let mut hosts = Vec::new();
+    for r in records {
+        if let Some(RData::SRV(srv)) = r.data() {
+            let host = srv.target().to_string();
+            if !has_addr_for_host(&host, records) {
+                hosts.push(host);
+            }
+        }
+    }
+    hosts.sort();
+    hosts.dedup();
+    hosts
+}
+
+fn has_addr_for_host(host: &str, records: &[Record]) -> bool {
+    let host_norm = strip_trailing_dot(host).to_ascii_lowercase();
+    records.iter().any(|r| {
+        matches!(r.data(), Some(RData::A(_) | RData::AAAA(_)))
+            && matches_host(&r.name().to_string(), &host_norm)
+    })
+}
+
+fn decode_host_addr_map(records: &[Record]) -> BTreeMap<String, Vec<IpAddr>> {
+    let mut by_host: BTreeMap<String, Vec<IpAddr>> = BTreeMap::new();
+    for r in records {
+        let addr = match r.data() {
+            Some(RData::A(A(ip))) => IpAddr::V4(*ip),
+            Some(RData::AAAA(AAAA(ip))) => IpAddr::V6(*ip),
+            _ => continue,
+        };
+        let key = strip_trailing_dot(&r.name().to_string()).to_ascii_lowercase();
+        by_host.entry(key).or_default().push(addr);
+    }
+    for addrs in by_host.values_mut() {
+        addrs.sort();
+        addrs.dedup();
+    }
+    by_host
+}
+
 #[allow(
     clippy::cognitive_complexity,
     reason = "match arms enumerate DNS record types; splitting hurts readability"
 )]
 fn decode_instances(service: &ServiceType, records: &[Record]) -> Vec<Instance> {
     let mut by_name: BTreeMap<Name, Instance> = BTreeMap::new();
+    let addrs_by_host = decode_host_addr_map(records);
 
     for r in records {
         match r.data() {
             Some(RData::SRV(srv)) => {
+                let host = srv.target().to_string();
+                let addrs = addrs_by_host
+                    .get(&strip_trailing_dot(&host).to_ascii_lowercase())
+                    .cloned()
+                    .unwrap_or_default();
                 let entry = by_name.entry(r.name().clone()).or_insert_with(|| Instance {
                     service_type: service.clone(),
                     instance_name: leftmost_label(r.name()),
-                    host: srv.target().to_string(),
+                    host: host.clone(),
                     port: srv.port(),
+                    addrs: addrs.clone(),
                     txt: BTreeMap::new(),
                 });
-                entry.host = srv.target().to_string();
+                entry.host = host;
                 entry.port = srv.port();
+                entry.addrs = addrs;
             }
             Some(RData::TXT(txt)) => {
                 let entry = by_name.entry(r.name().clone()).or_insert_with(|| Instance {
@@ -372,6 +465,7 @@ fn decode_instances(service: &ServiceType, records: &[Record]) -> Vec<Instance> 
                     instance_name: leftmost_label(r.name()),
                     host: String::new(),
                     port: 0,
+                    addrs: Vec::new(),
                     txt: BTreeMap::new(),
                 });
                 for kv in txt.iter() {
@@ -384,7 +478,19 @@ fn decode_instances(service: &ServiceType, records: &[Record]) -> Vec<Instance> 
         }
     }
 
-    by_name.into_values().filter(|i| i.port != 0).collect()
+    by_name
+        .into_values()
+        .filter(|i| i.port != 0)
+        .map(|mut i| {
+            if i.addrs.is_empty()
+                && let Some(addrs) =
+                    addrs_by_host.get(&strip_trailing_dot(&i.host).to_ascii_lowercase())
+            {
+                i.addrs.clone_from(addrs);
+            }
+            i
+        })
+        .collect()
 }
 
 fn decode_host_answers(host: &str, records: &[Record]) -> Vec<HostAnswer> {
@@ -685,6 +791,29 @@ mod tests {
         assert_eq!(
             answer.addrs,
             vec![std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 5))]
+        );
+    }
+
+    #[test]
+    fn decode_instances_attaches_host_addresses() {
+        use hickory_proto::rr::rdata::{A, SRV};
+        use hickory_proto::rr::{DNSClass, Name, RData, Record};
+
+        let instance = Name::from_utf8("Living._airplay._tcp.local.").expect("instance");
+        let host = Name::from_utf8("Living.local.").expect("host");
+        let mut srv =
+            Record::from_rdata(instance, 60, RData::SRV(SRV::new(0, 0, 7000, host.clone())));
+        srv.set_dns_class(DNSClass::IN);
+        let mut a = Record::from_rdata(host, 60, RData::A(A(std::net::Ipv4Addr::new(10, 0, 0, 7))));
+        a.set_dns_class(DNSClass::IN);
+
+        let service = ServiceType::new("_airplay", Protocol::Tcp);
+        let instances = decode_instances(&service, &[srv, a]);
+        assert_eq!(instances.len(), 1);
+        let instance = instances.first().expect("instance");
+        assert_eq!(
+            instance.addrs,
+            vec![std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 7))]
         );
     }
 }

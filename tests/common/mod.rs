@@ -62,7 +62,7 @@ pub(crate) fn spawn_test_responder(table: AnswerTable) -> Responder {
     Responder::new(test_mode(), whodis::Authorization::new(), table, 1, None).expect("responder")
 }
 
-/// Build and send a single mDNS response containing PTR + SRV + TXT records
+/// Build and send a single mDNS response containing PTR + SRV + TXT + A records
 /// for `FakeATV._pentest-test._tcp.local.` to the test multicast group.
 /// The browser must be running and joined to the group before calling this.
 pub(crate) fn send_fake_appletv_announcement() {
@@ -94,6 +94,12 @@ pub(crate) fn send_fake_appletv_announcement() {
     );
     txt_rec.dns_class = DNSClass::IN;
     msg.add_answer(txt_rec);
+
+    // A: FakeATV.local. -> 127.0.0.1
+    let host = Name::from_utf8("FakeATV.local.").expect("host name");
+    let mut a_rec = Record::from_rdata(host, 60, RData::A(A(Ipv4Addr::LOCALHOST)));
+    a_rec.dns_class = DNSClass::IN;
+    msg.add_answer(a_rec);
 
     let bytes = msg.to_bytes().expect("encode");
 

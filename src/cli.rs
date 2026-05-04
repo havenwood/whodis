@@ -815,6 +815,7 @@ mod tests {
             instance_name: "Foo".into(),
             host: "Foo.local.".into(),
             port: 7000,
+            addrs: Vec::new(),
             txt: std::collections::BTreeMap::new(),
         };
         let event = crate::browse::Event::InstanceFound { instance: inst };

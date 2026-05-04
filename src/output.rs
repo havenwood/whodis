@@ -142,7 +142,7 @@ pub(crate) fn emit_instance(
     match renderer {
         Renderer::Jsonl => emit_jsonl(&Device {
             instance: instance.clone(),
-            addrs: Vec::new(),
+            addrs: instance.addrs.clone(),
             fingerprint: fp.cloned(),
         }),
         Renderer::Pretty(c) => emit_instance_pretty(c, instance, fp),
@@ -235,6 +235,15 @@ fn emit_instance_pretty(
     let mut out = io::stdout().lock();
     writeln!(out, "{}", paint(on, &instance.fqdn(), BOLD))?;
     writeln!(out, "    host        {}", instance.host)?;
+    if !instance.addrs.is_empty() {
+        let addrs = instance
+            .addrs
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        writeln!(out, "    addrs       {addrs}")?;
+    }
     writeln!(out, "    port        {}", instance.port)?;
     let mut rendered_txt = Vec::with_capacity(instance.txt.len());
     for (k, v) in &instance.txt {

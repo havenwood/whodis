@@ -170,6 +170,7 @@ mod tests {
             instance_name: "x".into(),
             host: "x.local".into(),
             port: 0,
+            addrs: Vec::new(),
             txt,
         }
     }

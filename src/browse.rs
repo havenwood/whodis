@@ -1,12 +1,14 @@
 //! Continuous mDNS service browser.
 
 use std::collections::BTreeMap;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
 use dashmap::DashMap;
 use hickory_proto::op::{Message, MessageType, OpCode, Query};
+use hickory_proto::rr::rdata::{A, AAAA};
 use hickory_proto::rr::{Name, RData, Record, RecordType};
 use hickory_proto::serialize::binary::{BinDecodable, BinEncodable};
 use serde::Serialize;
@@ -43,6 +45,7 @@ pub struct Browser {
     transport: Arc<Transport>,
     cache: Arc<DashMap<String, CacheEntry>>,
     known_service_types: Arc<DashMap<String, ServiceType>>,
+    host_addrs: Arc<DashMap<String, Vec<IpAddr>>>,
     cancel: CancellationToken,
 }
 
@@ -53,6 +56,7 @@ impl Browser {
             transport,
             cache: Arc::new(DashMap::new()),
             known_service_types: Arc::new(DashMap::new()),
+            host_addrs: Arc::new(DashMap::new()),
             cancel: CancellationToken::new(),
         })
     }
@@ -69,9 +73,18 @@ impl Browser {
         let rx_transport = self.transport.clone();
         let rx_cache = self.cache.clone();
         let rx_types = self.known_service_types.clone();
+        let rx_host_addrs = self.host_addrs.clone();
         let rx_cancel = cancel.clone();
         tokio::spawn(async move {
-            run_rx(rx_transport, rx_cache, rx_types, tx, rx_cancel).await;
+            run_rx(
+                rx_transport,
+                rx_cache,
+                rx_types,
+                rx_host_addrs,
+                tx,
+                rx_cancel,
+            )
+            .await;
         });
 
         let tx_transport = self.transport;
@@ -139,6 +152,7 @@ async fn run_rx(
     transport: Arc<Transport>,
     cache: Arc<DashMap<String, CacheEntry>>,
     known: Arc<DashMap<String, ServiceType>>,
+    host_addrs: Arc<DashMap<String, Vec<IpAddr>>>,
     out: mpsc::Sender<Event>,
     cancel: CancellationToken,
 ) {
@@ -153,7 +167,7 @@ async fn run_rx(
                     Ok(Some(n)) => {
                         let payload = buf.get(..n).unwrap_or(&[]);
                         if let Ok(msg) = Message::from_bytes(payload) {
-                            handle_message(&msg, &cache, &known, &out).await;
+                            handle_message(&msg, &cache, &known, &host_addrs, &out).await;
                         }
                     }
                     Ok(None) => {}
@@ -201,10 +215,12 @@ async fn handle_message(
     msg: &Message,
     cache: &DashMap<String, CacheEntry>,
     known: &DashMap<String, ServiceType>,
+    host_addrs: &DashMap<String, Vec<IpAddr>>,
     out: &mpsc::Sender<Event>,
 ) {
     let records: Vec<&Record> = msg.answers().iter().chain(msg.additionals()).collect();
     let mut staged: BTreeMap<String, Instance> = BTreeMap::new();
+    let mut changed_hosts: BTreeMap<String, Vec<IpAddr>> = BTreeMap::new();
 
     for r in &records {
         match r.data() {
@@ -229,6 +245,7 @@ async fn handle_message(
                             instance_name: inst_name,
                             host: String::new(),
                             port: 0,
+                            addrs: Vec::new(),
                             txt: BTreeMap::new(),
                         });
                     if r.ttl() == 0 {
@@ -251,10 +268,15 @@ async fn handle_message(
                     instance_name: leftmost_label(r.name()),
                     host: String::new(),
                     port: 0,
+                    addrs: Vec::new(),
                     txt: BTreeMap::new(),
                 });
                 inst.host = srv.target().to_string();
                 inst.port = srv.port();
+                inst.addrs = host_addrs
+                    .get(&normalize_host(&inst.host))
+                    .map(|entry| entry.value().clone())
+                    .unwrap_or_default();
             }
             Some(RData::TXT(txt)) => {
                 let key = r.name().to_string();
@@ -263,6 +285,7 @@ async fn handle_message(
                     instance_name: leftmost_label(r.name()),
                     host: String::new(),
                     port: 0,
+                    addrs: Vec::new(),
                     txt: BTreeMap::new(),
                 });
                 for kv in txt.iter() {
@@ -271,11 +294,84 @@ async fn handle_message(
                     }
                 }
             }
+            Some(RData::A(A(ip))) => {
+                let host = normalize_host(&r.name().to_string());
+                changed_hosts.entry(host).or_default().push(IpAddr::V4(*ip));
+            }
+            Some(RData::AAAA(AAAA(ip))) => {
+                let host = normalize_host(&r.name().to_string());
+                changed_hosts.entry(host).or_default().push(IpAddr::V6(*ip));
+            }
             _ => {}
         }
     }
 
+    apply_addr_updates(host_addrs, &mut changed_hosts);
+    attach_staged_addrs(&mut staged, host_addrs);
     emit_staged(staged, cache, out).await;
+    emit_cached_addr_updates(changed_hosts, cache, out).await;
+}
+
+fn apply_addr_updates(
+    host_addrs: &DashMap<String, Vec<IpAddr>>,
+    changed_hosts: &mut BTreeMap<String, Vec<IpAddr>>,
+) {
+    for (host, addrs) in changed_hosts {
+        addrs.sort();
+        addrs.dedup();
+        let mut merged = host_addrs
+            .get(host)
+            .map(|entry| entry.value().clone())
+            .unwrap_or_default();
+        merged.extend(addrs.iter().copied());
+        merged.sort();
+        merged.dedup();
+        host_addrs.insert(host.clone(), merged.clone());
+        addrs.clone_from(&merged);
+    }
+}
+
+fn attach_staged_addrs(
+    staged: &mut BTreeMap<String, Instance>,
+    host_addrs: &DashMap<String, Vec<IpAddr>>,
+) {
+    for inst in staged.values_mut() {
+        if inst.host.is_empty() {
+            continue;
+        }
+        if let Some(addrs) = host_addrs.get(&normalize_host(&inst.host)) {
+            inst.addrs.clone_from(addrs.value());
+        }
+    }
+}
+
+async fn emit_cached_addr_updates(
+    changed_hosts: BTreeMap<String, Vec<IpAddr>>,
+    cache: &DashMap<String, CacheEntry>,
+    out: &mpsc::Sender<Event>,
+) {
+    if changed_hosts.is_empty() {
+        return;
+    }
+    let cached: Vec<(String, Instance)> = cache
+        .iter()
+        .map(|entry| (entry.key().clone(), entry.value().instance.clone()))
+        .collect();
+    for (key, mut inst) in cached {
+        let Some(addrs) = changed_hosts.get(&normalize_host(&inst.host)) else {
+            continue;
+        };
+        if inst.addrs == *addrs {
+            continue;
+        }
+        inst.addrs.clone_from(addrs);
+        out.send(Event::InstanceUpdated {
+            instance: inst.clone(),
+        })
+        .await
+        .ok();
+        cache.insert(key, CacheEntry { instance: inst });
+    }
 }
 
 async fn emit_staged(
@@ -328,7 +424,14 @@ fn merge_partial(base: &mut Instance, partial: Instance) {
     if partial.port != 0 {
         base.port = partial.port;
     }
+    if !partial.addrs.is_empty() {
+        base.addrs = partial.addrs;
+    }
     base.txt.extend(partial.txt);
+}
+
+fn normalize_host(host: &str) -> String {
+    host.trim_end_matches('.').to_ascii_lowercase()
 }
 
 /// Extract the target Name from a PTR record. hickory-proto 0.24 represents PTR as
@@ -410,6 +513,7 @@ mod tests {
             instance_name: "Living".into(),
             host: "Living.local.".into(),
             port: 7000,
+            addrs: Vec::new(),
             txt: BTreeMap::new(),
         };
         let mut partial_txt = BTreeMap::new();
@@ -419,6 +523,7 @@ mod tests {
             instance_name: "Living".into(),
             host: String::new(),
             port: 0,
+            addrs: Vec::new(),
             txt: partial_txt,
         };
 

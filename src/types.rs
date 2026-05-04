@@ -50,6 +50,8 @@ pub struct Instance {
     pub instance_name: String,
     pub host: String,
     pub port: u16,
+    #[serde(default)]
+    pub addrs: Vec<IpAddr>,
     #[serde(with = "txt_map_serde")]
     pub txt: BTreeMap<String, Bytes>,
 }
@@ -143,6 +145,7 @@ mod tests {
             instance_name: "Living Room".into(),
             host: "Living-Room.local".into(),
             port: 7000,
+            addrs: Vec::new(),
             txt: BTreeMap::new(),
         };
         assert_eq!(inst.fqdn(), "Living Room._airplay._tcp.local.");
@@ -157,6 +160,7 @@ mod tests {
             instance_name: "Living".into(),
             host: "h.local".into(),
             port: 7000,
+            addrs: Vec::new(),
             txt,
         };
         let s = serde_json::to_string(&inst).expect("serialize");
@@ -172,6 +176,7 @@ mod tests {
             instance_name: "x".into(),
             host: "x.local".into(),
             port: 1,
+            addrs: Vec::new(),
             txt,
         };
         let s = serde_json::to_string(&inst).expect("serialize");

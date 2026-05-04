@@ -28,7 +28,7 @@ async fn browse_finds_responder() {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         match tokio::time::timeout(remaining, stream.next()).await {
             Ok(Some(Event::InstanceFound { instance })) => {
-                if instance.txt.contains_key("model") {
+                if instance.txt.contains_key("model") && !instance.addrs.is_empty() {
                     found = true;
                     break;
                 }
