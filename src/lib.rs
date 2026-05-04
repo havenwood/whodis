@@ -5,6 +5,7 @@
 #![doc(html_root_url = "https://docs.rs/whodis")]
 
 mod auth;
+mod capture;
 mod cli;
 mod error;
 mod mode;

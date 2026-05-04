@@ -127,6 +127,17 @@ pub enum Cmd {
         #[command(subcommand)]
         kind: FloodCmd,
     },
+
+    /// Capture mDNS traffic to a pcap file.
+    Capture {
+        /// Output pcap file path.
+        #[arg(long, value_name = "FILE")]
+        pcap: std::path::PathBuf,
+
+        /// Capture window in seconds. 0 = until Ctrl-C.
+        #[arg(short = 't', long, default_value_t = 0)]
+        timeout: u64,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -214,6 +225,10 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             run_spoof(renderer, table, template, name, ip, burst, allow, allow_instance).await?;
         }
         Cmd::Flood { kind } => run_flood(kind).await?,
+        Cmd::Capture { pcap, timeout } => {
+            let count = crate::capture::run(&pcap, timeout).await?;
+            tracing::info!(packets = count, file = %pcap.display(), "capture complete");
+        }
     }
     Ok(())
 }

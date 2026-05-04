@@ -111,6 +111,16 @@ whodis flood goodbye Foo._airplay._tcp.local. --forever
 
 `--rate` caps packets per second (default 50, minimum 1). `--count N` sends N packets per target (default 1, minimum 1). `--forever` repeats until Ctrl-C; mutually exclusive with `--count`.
 
+## Capture
+
+Listen on 5353 and write every received mDNS packet to a pcap file. Output is LINKTYPE_RAW (synthesized IPv4/IPv6 + UDP wrappers) so Wireshark and tshark open it directly.
+
+```sh
+whodis capture --pcap engagement.pcap -t 60     # 60s window
+whodis capture --pcap engagement.pcap           # until Ctrl-C
+tshark -r engagement.pcap                        # inspect
+```
+
 ## Demo: spoof, browse, flood together
 
 Three terminals using the `answers.toml` from the Spoof section.
