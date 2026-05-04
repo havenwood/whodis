@@ -71,6 +71,10 @@ pub enum Cmd {
         /// Tag each instance with a vendor/product guess.
         #[arg(short = 'f', long)]
         fingerprint: bool,
+
+        /// Run for a 5-second window then exit. -t overrides the window.
+        #[arg(long = "once", short = '1')]
+        once: bool,
     },
 
     /// Send a directed mDNS query. Without args, lists service types on the LAN.
@@ -174,7 +178,8 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         Cmd::Browse {
             timeout,
             fingerprint,
-        } => run_browse(renderer, timeout, fingerprint).await?,
+            once,
+        } => run_browse(renderer, timeout, fingerprint, once).await?,
         Cmd::Probe {
             service,
             instance,
@@ -231,7 +236,20 @@ fn init_tracing(quiet: bool, verbose: u8) {
         .ok();
 }
 
-async fn run_browse(renderer: Renderer, timeout: u64, fingerprint: bool) -> anyhow::Result<()> {
+async fn run_browse(
+    renderer: Renderer,
+    timeout: u64,
+    fingerprint: bool,
+    once: bool,
+) -> anyhow::Result<()> {
+    let effective_timeout = if timeout > 0 {
+        timeout
+    } else if once {
+        5
+    } else {
+        0
+    };
+
     let browser = Browser::new(Mode::Listen).context("starting browser")?;
     let cancel = browser.cancel_token();
     let stream = browser.run();
@@ -256,8 +274,8 @@ async fn run_browse(renderer: Renderer, timeout: u64, fingerprint: bool) -> anyh
         }
     });
 
-    if timeout > 0 {
-        tokio::time::sleep(Duration::from_secs(timeout)).await;
+    if effective_timeout > 0 {
+        tokio::time::sleep(Duration::from_secs(effective_timeout)).await;
     } else {
         tokio::signal::ctrl_c().await.ok();
     }

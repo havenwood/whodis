@@ -32,6 +32,7 @@ Listens on UDP/5353 (REUSEPORT, coexists with `mDNSResponder`) and emits one rec
 whodis browse                       # JSONL until Ctrl-C
 whodis browse --pretty              # human view, ANSI color on TTY
 whodis browse --fingerprint         # tag each instance with vendor / product
+whodis browse --once                # 5-second snapshot, exits clean
 whodis browse -t 30                 # auto-exit after 30s
 whodis browse | jq -c 'select(.kind == "instance_found")'
 ```
