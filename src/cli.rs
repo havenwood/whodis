@@ -495,10 +495,10 @@ async fn run_spoof(
     let ports = table.srv_ports().to_vec();
     let resp = crate::spoof::Responder::new(Mode::Authoritative, auth, table, burst)?;
     let cancel = resp.cancel_token();
-    if let Some(target) = relay {
-        if let Err(e) = crate::relay::run(&ports, target, cancel.clone()).await {
-            tracing::error!(error = %e, "relay setup failed");
-        }
+    if let Some(target) = relay
+        && let Err(e) = crate::relay::run(&ports, target, cancel.clone()).await
+    {
+        tracing::error!(error = %e, "relay setup failed");
     }
     let task = tokio::spawn(async move { resp.run().await });
     tokio::signal::ctrl_c().await.ok();

@@ -38,10 +38,10 @@ pub(crate) async fn run(path: &Path, timeout: u64) -> Result<usize> {
 
     let mut count = 0_usize;
     loop {
-        if let Some(d) = deadline {
-            if tokio::time::Instant::now() >= d {
-                break;
-            }
+        if let Some(d) = deadline
+            && tokio::time::Instant::now() >= d
+        {
+            break;
         }
         tokio::select! {
             () = cancel.cancelled() => break,

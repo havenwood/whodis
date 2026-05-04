@@ -22,7 +22,7 @@ use crate::types::{Instance, Protocol, ServiceType};
 
 const META_QUERY: &str = "_services._dns-sd._udp.local.";
 const BACKOFF_STEPS_MS: &[u64] = &[1_000, 2_000, 4_000, 8_000];
-const STEADY_INTERVAL: Duration = Duration::from_secs(60);
+const STEADY_INTERVAL: Duration = Duration::from_mins(1);
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -211,12 +211,12 @@ async fn handle_message(
                 let target = ptr_target(ptr);
                 let owner = r.name().to_string();
                 if owner == META_QUERY {
-                    if let Some(svc) = parse_service_type_from_owner(&target.to_string()) {
-                        if known.insert(svc.fqdn(), svc.clone()).is_none() {
-                            out.send(Event::ServiceTypeFound { service_type: svc })
-                                .await
-                                .ok();
-                        }
+                    if let Some(svc) = parse_service_type_from_owner(&target.to_string())
+                        && known.insert(svc.fqdn(), svc.clone()).is_none()
+                    {
+                        out.send(Event::ServiceTypeFound { service_type: svc })
+                            .await
+                            .ok();
                     }
                 } else if let Some(svc) = parse_service_type_from_owner(&owner) {
                     let inst_name = leftmost_label(target);

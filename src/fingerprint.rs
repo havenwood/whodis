@@ -141,12 +141,11 @@ fn signatures() -> &'static [Sig] {
 #[must_use]
 pub fn identify(instance: &Instance) -> Option<Fingerprint> {
     for sig in signatures() {
-        if let Some(value) = instance.txt.get(sig.txt_key) {
-            if let Ok(s) = std::str::from_utf8(value) {
-                if s.contains(sig.needle) {
-                    return Some(sig.to_fingerprint());
-                }
-            }
+        if let Some(value) = instance.txt.get(sig.txt_key)
+            && let Ok(s) = std::str::from_utf8(value)
+            && s.contains(sig.needle)
+        {
+            return Some(sig.to_fingerprint());
         }
     }
     None

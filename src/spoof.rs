@@ -161,11 +161,10 @@ fn auth_names_for_entry(
             Some(RData::SRV(srv)) => names.push(srv.target().to_string()),
             _ => {}
         }
-        if matches!(entry.qtype, RecordType::A | RecordType::AAAA) {
-            if let Some(instances) = srv_target_to_instances.get(&normalize(&r.name().to_string()))
-            {
-                names.extend(instances.iter().cloned());
-            }
+        if matches!(entry.qtype, RecordType::A | RecordType::AAAA)
+            && let Some(instances) = srv_target_to_instances.get(&normalize(&r.name().to_string()))
+        {
+            names.extend(instances.iter().cloned());
         }
     }
     names.sort_by_key(|name| normalize(name));

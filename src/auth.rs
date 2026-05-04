@@ -79,10 +79,11 @@ fn instance_candidates(name: &str) -> Vec<String> {
     let full = normalize_instance_id(name);
     let mut candidates = Vec::with_capacity(2);
     candidates.push(full.clone());
-    if let Some(leftmost) = full.split('.').next() {
-        if !leftmost.is_empty() && leftmost != full {
-            candidates.push(leftmost.to_string());
-        }
+    if let Some(leftmost) = full.split('.').next()
+        && !leftmost.is_empty()
+        && leftmost != full
+    {
+        candidates.push(leftmost.to_string());
     }
     candidates
 }
