@@ -32,7 +32,10 @@ pub struct ServiceType {
 impl ServiceType {
     #[must_use]
     pub fn new(name: impl Into<String>, protocol: Protocol) -> Self {
-        Self { name: name.into(), protocol }
+        Self {
+            name: name.into(),
+            protocol,
+        }
     }
 
     #[must_use]
@@ -97,8 +100,8 @@ mod txt_map_serde {
     ) -> Result<S::Ok, S::Error> {
         let mut m = ser.serialize_map(Some(map.len()))?;
         for (k, v) in map {
-            let value = std::str::from_utf8(v)
-                .map_or_else(|_| format!("0x{}", hex_lower(v)), String::from);
+            let value =
+                std::str::from_utf8(v).map_or_else(|_| format!("0x{}", hex_lower(v)), String::from);
             m.serialize_entry(k, &value)?;
         }
         m.end()

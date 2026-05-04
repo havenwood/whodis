@@ -121,8 +121,8 @@ fn emit_instance_pretty(
         .txt
         .iter()
         .map(|(k, v)| {
-            let value = std::str::from_utf8(v)
-                .map_or_else(|_| format!("0x{}", hex_lower(v)), String::from);
+            let value =
+                std::str::from_utf8(v).map_or_else(|_| format!("0x{}", hex_lower(v)), String::from);
             format!("{k}={value}")
         })
         .collect::<Vec<_>>()
@@ -202,5 +202,4 @@ mod tests {
         assert!(s.starts_with("\x1b[31m"));
         assert!(s.ends_with("\x1b[0m"));
     }
-
 }

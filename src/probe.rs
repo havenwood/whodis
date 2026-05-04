@@ -24,7 +24,9 @@ pub struct ProbeOptions {
 
 impl Default for ProbeOptions {
     fn default() -> Self {
-        Self { timeout: DEFAULT_TIMEOUT }
+        Self {
+            timeout: DEFAULT_TIMEOUT,
+        }
     }
 }
 
@@ -128,7 +130,10 @@ where
     Ok(decode(&records))
 }
 
-#[allow(clippy::cognitive_complexity, reason = "match arms enumerate DNS record types; splitting hurts readability")]
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "match arms enumerate DNS record types; splitting hurts readability"
+)]
 fn decode_instances(service: &ServiceType, records: &[Record]) -> Vec<Instance> {
     let mut by_name: BTreeMap<Name, Instance> = BTreeMap::new();
 
@@ -178,7 +183,10 @@ fn decode_host_answers(host: &str, records: &[Record]) -> Vec<HostAnswer> {
     if addrs.is_empty() {
         return Vec::new();
     }
-    vec![HostAnswer { host: host.to_string(), addrs }]
+    vec![HostAnswer {
+        host: host.to_string(),
+        addrs,
+    }]
 }
 
 fn leftmost_label(name: &Name) -> String {

@@ -127,11 +127,7 @@ fn build_conflict(fqdn: &str) -> Result<Vec<u8>> {
 
     let conflict_target = Name::from_utf8("whodis-conflict.local.")
         .map_err(|_| Error::InvalidServiceType("whodis-conflict.local.".to_string()))?;
-    let mut srv = Record::from_rdata(
-        name,
-        120,
-        RData::SRV(SRV::new(0, 0, 0, conflict_target)),
-    );
+    let mut srv = Record::from_rdata(name, 120, RData::SRV(SRV::new(0, 0, 0, conflict_target)));
     srv.set_dns_class(DNSClass::IN);
     msg.add_answer(srv);
 
@@ -168,7 +164,10 @@ mod tests {
             r.data(),
             Some(hickory_proto::rr::RData::SRV(srv)) if srv.target().to_string().contains("whodis-conflict")
         );
-        assert!(is_srv_with_conflict, "expected SRV record with whodis-conflict target");
+        assert!(
+            is_srv_with_conflict,
+            "expected SRV record with whodis-conflict target"
+        );
     }
 
     #[tokio::test(start_paused = true)]

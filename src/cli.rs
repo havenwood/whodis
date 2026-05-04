@@ -138,11 +138,21 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
     let renderer = pick_renderer(&cli);
     match cli.command {
         Cmd::Browse { timeout } => run_browse(renderer, timeout).await?,
-        Cmd::Probe { service, instance, host, timeout } => {
+        Cmd::Probe {
+            service,
+            instance,
+            host,
+            timeout,
+        } => {
             run_probe(renderer, service, instance, host, timeout).await?;
         }
         Cmd::Fingerprint => run_fingerprint(renderer)?,
-        Cmd::Spoof { table, burst, allow, allow_instance } => {
+        Cmd::Spoof {
+            table,
+            burst,
+            allow,
+            allow_instance,
+        } => {
             run_spoof(renderer, table, burst, allow, allow_instance).await?;
         }
         Cmd::Flood { kind } => run_flood(kind).await?,
@@ -212,7 +222,10 @@ async fn run_browse(renderer: Renderer, timeout: u64) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[allow(clippy::cognitive_complexity, reason = "probe dispatch branches across host/service/instance paths")]
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "probe dispatch branches across host/service/instance paths"
+)]
 async fn run_probe(
     renderer: Renderer,
     service: String,
@@ -220,7 +233,9 @@ async fn run_probe(
     host: Option<String>,
     timeout: u64,
 ) -> anyhow::Result<()> {
-    let opts = ProbeOptions { timeout: Duration::from_secs(timeout) };
+    let opts = ProbeOptions {
+        timeout: Duration::from_secs(timeout),
+    };
     if let Some(h) = host {
         let answers = probe::probe_host(&h, &opts).await?;
         for a in answers {
@@ -252,7 +267,10 @@ fn run_fingerprint(renderer: Renderer) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[allow(clippy::similar_names, reason = "names match CLI flag spelling: allow vs allow_instance")]
+#[allow(
+    clippy::similar_names,
+    reason = "names match CLI flag spelling: allow vs allow_instance"
+)]
 async fn run_spoof(
     _renderer: Renderer,
     table_path: std::path::PathBuf,
@@ -281,19 +299,30 @@ async fn run_spoof(
     Ok(())
 }
 
-#[allow(clippy::needless_pass_by_value, reason = "FloodCmd must be owned to destructure in match arms")]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "FloodCmd must be owned to destructure in match arms"
+)]
 async fn run_flood(kind: FloodCmd) -> anyhow::Result<()> {
     use std::num::NonZeroU32;
 
     match kind {
-        FloodCmd::Goodbye { targets, allow_instance, rate } => {
+        FloodCmd::Goodbye {
+            targets,
+            allow_instance,
+            rate,
+        } => {
             let auth = build_auth(allow_instance);
             let opts = FloodOptions {
                 rate_pps: NonZeroU32::new(rate).unwrap_or(NonZeroU32::MIN),
             };
             flood::goodbye(Mode::Authoritative, &targets, &auth, opts).await?;
         }
-        FloodCmd::Conflict { targets, allow_instance, rate } => {
+        FloodCmd::Conflict {
+            targets,
+            allow_instance,
+            rate,
+        } => {
             let auth = build_auth(allow_instance);
             let opts = FloodOptions {
                 rate_pps: NonZeroU32::new(rate).unwrap_or(NonZeroU32::MIN),
@@ -340,7 +369,10 @@ mod tests {
     use clap::CommandFactory;
 
     #[test]
-    #[allow(clippy::panic, reason = "test assertion intentionally panics on wrong variant")]
+    #[allow(
+        clippy::panic,
+        reason = "test assertion intentionally panics on wrong variant"
+    )]
     fn cli_parses_browse_subcommand() {
         let c = Cli::try_parse_from(["whodis", "browse"]).expect("parse");
         match c.command {
@@ -350,7 +382,10 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::panic, reason = "test assertion intentionally panics on wrong variant")]
+    #[allow(
+        clippy::panic,
+        reason = "test assertion intentionally panics on wrong variant"
+    )]
     fn cli_parses_probe_with_service() {
         let c = Cli::try_parse_from(["whodis", "probe", "_airplay._tcp.local."]).expect("parse");
         match c.command {

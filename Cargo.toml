@@ -1,15 +1,23 @@
-[workspace]
-resolver = "2"
-members = ["crates/whodis"]
-
-[workspace.package]
+[package]
+name = "whodis"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/havenwood/whodis"
+description = "mDNS / Bonjour recon and spoof toolkit for macOS"
+keywords = ["mdns", "bonjour", "pentest", "security", "network"]
+categories = ["command-line-utilities", "network-programming"]
+readme = "README.md"
 
-[workspace.dependencies]
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "whodis"
+path = "src/bin/whodis.rs"
+
+[dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal", "io-util"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tokio-stream = "0.1"
@@ -32,7 +40,10 @@ clap = { version = "4", features = ["derive", "wrap_help"] }
 anyhow = "1"
 toml = "0.8"
 
-[workspace.lints.clippy]
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
+
+[lints.clippy]
 cargo = { level = "deny", priority = -1 }
 correctness = { level = "deny", priority = -1 }
 nursery = { level = "deny", priority = -1 }
@@ -69,7 +80,7 @@ multiple_unsafe_ops_per_block = "deny"
 indexing_slicing = "deny"
 allow_attributes_without_reason = "deny"
 
-[workspace.lints.rust]
+[lints.rust]
 future_incompatible = "deny"
 let_underscore = "deny"
 nonstandard_style = "deny"

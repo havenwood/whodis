@@ -32,7 +32,10 @@ pub struct AnswerTableBuilder {
 impl AnswerTableBuilder {
     #[must_use]
     pub fn new() -> Self {
-        Self { entries: Vec::new(), ttl: DEFAULT_TTL }
+        Self {
+            entries: Vec::new(),
+            ttl: DEFAULT_TTL,
+        }
     }
 
     #[must_use]
@@ -48,8 +51,8 @@ impl AnswerTableBuilder {
         rdata: RData,
     ) -> Result<Self> {
         let name_str = name.into();
-        let rec_name = Name::from_utf8(&name_str)
-            .map_err(|_| Error::InvalidServiceType(name_str.clone()))?;
+        let rec_name =
+            Name::from_utf8(&name_str).map_err(|_| Error::InvalidServiceType(name_str.clone()))?;
         let mut rec = Record::from_rdata(rec_name, self.ttl, rdata);
         rec.set_dns_class(DNSClass::IN);
         if let Some(existing) = self
@@ -122,12 +125,7 @@ pub struct Responder {
 }
 
 impl Responder {
-    pub fn new(
-        mode: Mode,
-        auth: Authorization,
-        table: AnswerTable,
-        burst: u8,
-    ) -> Result<Self> {
+    pub fn new(mode: Mode, auth: Authorization, table: AnswerTable, burst: u8) -> Result<Self> {
         if !mode.sends_responses() {
             return Err(Error::InvalidServiceType(format!(
                 "Responder requires Authoritative or Custom mode, got {mode:?}"
@@ -186,7 +184,11 @@ impl Responder {
             }
             if let Some(bytes) = self.table.lookup(&name, q.query_type()) {
                 for i in 0..self.burst {
-                    if let Err(e) = self.transport.send_query(bytes, Destination::Multicast).await {
+                    if let Err(e) = self
+                        .transport
+                        .send_query(bytes, Destination::Multicast)
+                        .await
+                    {
                         tracing::debug!(error = %e, "send failed");
                     }
                     if i + 1 < self.burst {

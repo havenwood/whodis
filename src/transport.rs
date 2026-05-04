@@ -39,7 +39,13 @@ impl Transport {
         if v4.is_none() && v6.is_none() {
             return Err(crate::Error::NoInterface);
         }
-        Ok(Self { mode, v4, v6, v4_ifaces, v6_ifaces })
+        Ok(Self {
+            mode,
+            v4,
+            v6,
+            v4_ifaces,
+            v6_ifaces,
+        })
     }
 
     #[allow(dead_code, reason = "consumed by browse/spoof modules in later tasks")]
@@ -189,4 +195,3 @@ mod tests {
         assert!(t.is_ok(), "Custom should bind unused port: {t:?}");
     }
 }
-

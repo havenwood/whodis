@@ -108,13 +108,13 @@ async fn run_tx(
     }
 }
 
-async fn send_round(
-    transport: &Transport,
-    known: &DashMap<String, ServiceType>,
-) -> Result<()> {
+async fn send_round(transport: &Transport, known: &DashMap<String, ServiceType>) -> Result<()> {
     let meta = build_query(META_QUERY, RecordType::PTR)?;
     transport.send_query(&meta, Destination::Multicast).await?;
-    #[allow(clippy::explicit_iter_loop, reason = "DashMap::iter() returns a specialized type, not IntoIterator")]
+    #[allow(
+        clippy::explicit_iter_loop,
+        reason = "DashMap::iter() returns a specialized type, not IntoIterator"
+    )]
     for entry in known.iter() {
         let q = build_query(&entry.value().fqdn(), RecordType::PTR)?;
         transport.send_query(&q, Destination::Multicast).await?;
@@ -123,8 +123,8 @@ async fn send_round(
 }
 
 fn build_query(name: &str, qtype: RecordType) -> Result<Vec<u8>> {
-    let n = Name::from_utf8(name)
-        .map_err(|_| crate::Error::InvalidServiceType(name.to_string()))?;
+    let n =
+        Name::from_utf8(name).map_err(|_| crate::Error::InvalidServiceType(name.to_string()))?;
     let mut m = Message::new();
     m.set_message_type(MessageType::Query)
         .set_op_code(OpCode::Query)
@@ -192,7 +192,10 @@ async fn recv_one(
     }
 }
 
-#[allow(clippy::cognitive_complexity, reason = "DNS record-type dispatch is naturally branchy")]
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "DNS record-type dispatch is naturally branchy"
+)]
 async fn handle_message(
     msg: &Message,
     cache: &DashMap<String, CacheEntry>,
@@ -210,23 +213,29 @@ async fn handle_message(
                 if owner == META_QUERY {
                     if let Some(svc) = parse_service_type_from_owner(&target.to_string()) {
                         if known.insert(svc.fqdn(), svc.clone()).is_none() {
-                            out.send(Event::ServiceTypeFound { service_type: svc }).await.ok();
+                            out.send(Event::ServiceTypeFound { service_type: svc })
+                                .await
+                                .ok();
                         }
                     }
                 } else if let Some(svc) = parse_service_type_from_owner(&owner) {
                     let inst_name = leftmost_label(target);
                     let target_str = target.to_string();
-                    let inst = staged.entry(target_str.clone()).or_insert_with(|| Instance {
-                        service_type: svc.clone(),
-                        instance_name: inst_name,
-                        host: String::new(),
-                        port: 0,
-                        txt: BTreeMap::new(),
-                    });
+                    let inst = staged
+                        .entry(target_str.clone())
+                        .or_insert_with(|| Instance {
+                            service_type: svc.clone(),
+                            instance_name: inst_name,
+                            host: String::new(),
+                            port: 0,
+                            txt: BTreeMap::new(),
+                        });
                     if r.ttl() == 0 {
-                        out.send(Event::InstanceGoodbye { fqdn: target_str.clone() })
-                            .await
-                            .ok();
+                        out.send(Event::InstanceGoodbye {
+                            fqdn: target_str.clone(),
+                        })
+                        .await
+                        .ok();
                         cache.remove(&target_str);
                         staged.remove(&target_str);
                     } else {
@@ -271,12 +280,20 @@ async fn handle_message(
         }
         match cache.get(&key) {
             None => {
-                out.send(Event::InstanceFound { instance: inst.clone() }).await.ok();
+                out.send(Event::InstanceFound {
+                    instance: inst.clone(),
+                })
+                .await
+                .ok();
                 cache.insert(key, CacheEntry { instance: inst });
             }
             Some(prev) if prev.instance != inst => {
                 drop(prev);
-                out.send(Event::InstanceUpdated { instance: inst.clone() }).await.ok();
+                out.send(Event::InstanceUpdated {
+                    instance: inst.clone(),
+                })
+                .await
+                .ok();
                 cache.insert(key, CacheEntry { instance: inst });
             }
             _ => {}

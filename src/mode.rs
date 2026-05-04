@@ -45,7 +45,10 @@ impl Mode {
 
     #[must_use]
     pub const fn binds_port(self) -> bool {
-        matches!(self, Self::Listen | Self::Authoritative | Self::Custom { .. })
+        matches!(
+            self,
+            Self::Listen | Self::Authoritative | Self::Custom { .. }
+        )
     }
 
     #[must_use]
