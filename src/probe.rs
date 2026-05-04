@@ -786,6 +786,30 @@ mod tests {
     }
 
     #[test]
+    fn leftmost_label_returns_full_label_with_embedded_dot() {
+        let labels: Vec<&[u8]> = vec![
+            b"v1.0 Speaker".as_slice(),
+            b"_airplay".as_slice(),
+            b"_tcp".as_slice(),
+            b"local".as_slice(),
+        ];
+        let name = Name::from_labels(labels).expect("name");
+        assert_eq!(leftmost_label(&name), "v1.0 Speaker");
+    }
+
+    #[test]
+    fn leftmost_label_decodes_unicode_label_bytes() {
+        let labels: Vec<&[u8]> = vec![
+            "Shannon\u{2019}s MacBook Pro".as_bytes(),
+            b"_airplay".as_slice(),
+            b"_tcp".as_slice(),
+            b"local".as_slice(),
+        ];
+        let name = Name::from_labels(labels).expect("name");
+        assert_eq!(leftmost_label(&name), "Shannon\u{2019}s MacBook Pro");
+    }
+
+    #[test]
     fn instance_fqdn_escapes_dot_in_instance_name() {
         let inst = crate::types::Instance {
             service_type: crate::types::ServiceType::new("_airplay", Protocol::Tcp),

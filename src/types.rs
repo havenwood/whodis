@@ -156,6 +156,35 @@ mod tests {
     }
 
     #[test]
+    fn instance_fqdn_escapes_backslash_in_instance_name() {
+        let inst = Instance {
+            service_type: ServiceType::new("_airplay", Protocol::Tcp),
+            instance_name: "back\\slash".into(),
+            host: "h.local".into(),
+            port: 0,
+            addrs: Vec::new(),
+            txt: BTreeMap::new(),
+        };
+        assert_eq!(inst.fqdn(), "back\\\\slash._airplay._tcp.local.");
+    }
+
+    #[test]
+    fn instance_fqdn_preserves_unicode_in_instance_name() {
+        let inst = Instance {
+            service_type: ServiceType::new("_airplay", Protocol::Tcp),
+            instance_name: "Shannon\u{2019}s MacBook Pro".into(),
+            host: "h.local".into(),
+            port: 0,
+            addrs: Vec::new(),
+            txt: BTreeMap::new(),
+        };
+        assert_eq!(
+            inst.fqdn(),
+            "Shannon\u{2019}s MacBook Pro._airplay._tcp.local."
+        );
+    }
+
+    #[test]
     fn instance_serializes_txt_as_strings() {
         let mut txt = BTreeMap::new();
         txt.insert("model".into(), Bytes::from_static(b"AppleTV11,1"));
