@@ -39,7 +39,11 @@ whodis browse --pretty              # human view, color on TTY
 whodis browse --fingerprint         # tag instances with vendor / product
 whodis browse --once                # 5-second snapshot
 whodis browse -t 30                 # auto-exit after 30s
+whodis browse --type _airplay._tcp.local.    # AirPlay receivers only
+whodis browse -T _ipp._tcp.local. --pretty   # printers only
 ```
+
+`--type FQDN` filters events to one service-type. Case- and trailing-dot-insensitive.
 
 ## Probe
 

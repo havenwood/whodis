@@ -89,6 +89,10 @@ pub enum Cmd {
         /// Run for a 5-second window then exit. -t overrides the window.
         #[arg(long = "once", short = '1')]
         once: bool,
+
+        /// Filter events to a specific service-type fqdn (e.g. `_airplay._tcp.local.`).
+        #[arg(short = 'T', long = "type", value_name = "FQDN")]
+        service_type: Option<String>,
     },
 
     /// Send a directed mDNS query. Without args, lists service types on the LAN.
@@ -269,7 +273,8 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             timeout,
             fingerprint,
             once,
-        } => run_browse(renderer, timeout, fingerprint, once).await?,
+            service_type,
+        } => run_browse(renderer, timeout, fingerprint, once, service_type).await?,
         Cmd::Probe {
             service,
             instance,
@@ -389,11 +394,30 @@ fn init_tracing(quiet: bool, verbose: u8) {
         .ok();
 }
 
+fn event_matches_filter(event: &Event, filter: Option<&str>) -> bool {
+    let Some(filter) = filter else {
+        return true;
+    };
+    let filter = filter.trim_end_matches('.').to_ascii_lowercase();
+    match event {
+        Event::ServiceTypeFound { service_type } => {
+            service_type.fqdn().trim_end_matches('.').to_ascii_lowercase() == filter
+        }
+        Event::InstanceFound { instance } | Event::InstanceUpdated { instance } => {
+            instance.service_type.fqdn().trim_end_matches('.').to_ascii_lowercase() == filter
+        }
+        Event::InstanceGoodbye { fqdn } => {
+            fqdn.to_ascii_lowercase().contains(&filter)
+        }
+    }
+}
+
 async fn run_browse(
     renderer: Renderer,
     timeout: u64,
     fingerprint: bool,
     once: bool,
+    service_type_filter: Option<String>,
 ) -> anyhow::Result<()> {
     let effective_timeout = if timeout > 0 {
         timeout
@@ -410,6 +434,9 @@ async fn run_browse(
     let task = tokio::spawn(async move {
         tokio::pin!(stream);
         while let Some(event) = stream.next().await {
+            if !event_matches_filter(&event, service_type_filter.as_deref()) {
+                continue;
+            }
             let fp = if fingerprint {
                 match &event {
                     Event::InstanceFound { instance } | Event::InstanceUpdated { instance } => {
@@ -734,5 +761,26 @@ mod tests {
     #[test]
     fn debug_assert_clap_command_renders() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn filter_matches_instance_found_with_same_service_type() {
+        let inst = crate::types::Instance {
+            service_type: crate::types::ServiceType::new("_airplay", crate::types::Protocol::Tcp),
+            instance_name: "Foo".into(),
+            host: "Foo.local.".into(),
+            port: 7000,
+            txt: std::collections::BTreeMap::new(),
+        };
+        let event = crate::browse::Event::InstanceFound { instance: inst };
+        assert!(event_matches_filter(&event, Some("_airplay._tcp.local.")));
+        assert!(event_matches_filter(&event, Some("_AIRPLAY._tcp.local")));
+        assert!(!event_matches_filter(&event, Some("_ipp._tcp.local.")));
+    }
+
+    #[test]
+    fn filter_passes_everything_when_none() {
+        let event = crate::browse::Event::InstanceGoodbye { fqdn: "X._airplay._tcp.local.".into() };
+        assert!(event_matches_filter(&event, None));
     }
 }
