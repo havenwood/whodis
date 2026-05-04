@@ -5,10 +5,11 @@
 #![doc(html_root_url = "https://docs.rs/whodis")]
 
 mod auth;
+mod cli;
 mod error;
 mod mode;
-#[allow(dead_code, reason = "consumed by cli module in Task 12")]
 mod output;
+mod spoof_table;
 mod transport;
 mod types;
 
@@ -19,6 +20,7 @@ pub mod probe;
 pub mod spoof;
 
 pub use auth::Authorization;
+pub use cli::{Cli, Cmd, FloodCmd, run};
 pub use error::{Error, Result};
 pub use mode::{MDNS_GROUP_V4, MDNS_GROUP_V6, MDNS_PORT, Mode};
 pub use types::{Device, Fingerprint, HostAnswer, Instance, Protocol, ServiceType};

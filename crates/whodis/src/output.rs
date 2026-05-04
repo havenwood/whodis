@@ -17,15 +17,6 @@ pub(crate) enum ColorMode {
 
 impl ColorMode {
     #[must_use]
-    pub(crate) fn from_str_lossy(s: &str) -> Self {
-        match s.to_ascii_lowercase().as_str() {
-            "always" => Self::Always,
-            "never" => Self::Never,
-            _ => Self::Auto,
-        }
-    }
-
-    #[must_use]
     pub(crate) fn enabled(self) -> bool {
         match self {
             Self::Always => true,
@@ -44,17 +35,6 @@ impl ColorMode {
 pub(crate) enum Renderer {
     Jsonl,
     Pretty(ColorMode),
-}
-
-impl Renderer {
-    #[must_use]
-    pub(crate) fn auto(pretty: bool, color: ColorMode) -> Self {
-        if pretty {
-            Self::Pretty(color)
-        } else {
-            Self::Jsonl
-        }
-    }
 }
 
 pub(crate) fn emit_jsonl<T: Serialize>(value: &T) -> io::Result<()> {
@@ -223,10 +203,4 @@ mod tests {
         assert!(s.ends_with("\x1b[0m"));
     }
 
-    #[test]
-    fn color_mode_from_str_handles_known_values() {
-        assert_eq!(ColorMode::from_str_lossy("always"), ColorMode::Always);
-        assert_eq!(ColorMode::from_str_lossy("never"), ColorMode::Never);
-        assert_eq!(ColorMode::from_str_lossy("garbage"), ColorMode::Auto);
-    }
 }
