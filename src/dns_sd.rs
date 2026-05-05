@@ -92,6 +92,9 @@ pub(crate) async fn browse_service(
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Instance>(64);
 
     let regtype_clone = regtype.clone();
+    // Spawn the dns-sd browse on a blocking thread (the crate's API is sync).
+    // We discard the JoinHandle: the task self-exits when `tx` is dropped
+    // (which happens when this async function returns), so there's no leak.
     let _handle = tokio::task::spawn_blocking(move || {
         let browser = match astro_dnssd::ServiceBrowserBuilder::new(&regtype_clone).browse() {
             Ok(b) => b,
@@ -122,6 +125,10 @@ pub(crate) async fn browse_service(
                     };
                     let mut txt: BTreeMap<String, Bytes> = BTreeMap::new();
                     if let Some(map) = svc.txt_record {
+                        // astro-dnssd surfaces TXT as `HashMap<String, String>`, which means
+                        // any non-UTF8 TXT value has already been dropped by the crate before
+                        // we see it. Acceptable for engagement use - binary TXT is rare and the
+                        // wire-level path captures it faithfully when it works.
                         for (k, v) in map {
                             txt.insert(k, Bytes::from(v.into_bytes()));
                         }
