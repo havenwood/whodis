@@ -32,7 +32,11 @@ impl Default for ProbeOptions {
     }
 }
 
-pub async fn probe_service(service: &ServiceType, opts: &ProbeOptions) -> Result<Vec<Instance>> {
+pub async fn probe_service(
+    service: &ServiceType,
+    opts: &ProbeOptions,
+    no_dns_sd: bool,
+) -> Result<Vec<Instance>> {
     let transport = Transport::build(Mode::Listen)?;
     let qname = parse_name(&service.fqdn())?;
     let msg = build_query(&qname, RecordType::PTR);
@@ -56,7 +60,30 @@ pub async fn probe_service(service: &ServiceType, opts: &ProbeOptions) -> Result
         records.extend(collect_records(&transport, &followup, second_window).await?);
     }
     hydrate_host_records(&transport, &mut records, opts.timeout, started).await?;
-    Ok(decode_instances(service, &records))
+    let wire_results = decode_instances(service, &records);
+    if wire_results.is_empty()
+        && !no_dns_sd
+        && crate::dns_sd::is_apple_service_type(&service.fqdn())
+    {
+        let fallback = crate::dns_sd::browse_service(&service.fqdn(), opts.timeout).await;
+        match fallback {
+            Ok(instances) => {
+                let n = instances.len();
+                if n > 0 {
+                    tracing::info!(
+                        source = "dns_sd",
+                        count = n,
+                        "fallback supplemented wire results"
+                    );
+                }
+                return Ok(instances);
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "dns_sd fallback failed");
+            }
+        }
+    }
+    Ok(wire_results)
 }
 
 pub async fn probe_instance(

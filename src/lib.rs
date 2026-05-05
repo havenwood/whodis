@@ -9,6 +9,7 @@ mod auth;
 mod capture;
 mod cli;
 mod clone;
+pub(crate) mod dns_sd;
 mod error;
 mod hickory_compat;
 mod mode;

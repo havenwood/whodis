@@ -30,6 +30,10 @@ use crate::types::{Protocol, ServiceType};
     long_about = "whodis: ask the LAN \"who is this\" and (sometimes) lie about the answer.\n\
                   See `whodis <command> --help` for details on each command."
 )]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "flags map 1:1 to CLI bool options; a state machine would obscure intent"
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Cmd,
@@ -58,6 +62,11 @@ pub struct Cli {
     /// Default: all non-loopback interfaces.
     #[arg(global = true, short = 'i', long = "interface", value_name = "NAME")]
     pub interface: Vec<String>,
+
+    /// Disable the mDNSResponder (`dns_sd`) fallback for known Apple service types.
+    /// When set, probe only uses wire-level mDNS even if no results are found.
+    #[arg(global = true, long = "no-dns-sd")]
+    pub no_dns_sd: bool,
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, Copy)]
@@ -371,7 +380,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             host,
             timeout,
         } => {
-            run_probe(renderer, service, instance, host, timeout).await?;
+            run_probe(renderer, service, instance, host, timeout, cli.no_dns_sd).await?;
         }
         Cmd::Spoof {
             table,
@@ -615,6 +624,7 @@ async fn run_probe(
     instance: Option<String>,
     host: Option<String>,
     timeout: Option<u64>,
+    no_dns_sd: bool,
 ) -> anyhow::Result<()> {
     // If no positional arg and no explicit timeout, use 8s for discovery; otherwise use defaults.
     let effective_timeout = if service.is_none() && host.is_none() {
@@ -639,7 +649,7 @@ async fn run_probe(
     let instances = if let Some(name) = instance {
         probe::probe_instance(&name, &svc, &opts).await?
     } else {
-        probe::probe_service(&svc, &opts).await?
+        probe::probe_service(&svc, &opts, no_dns_sd).await?
     };
     for inst in instances {
         let fp = crate::fingerprint::identify(&inst);
@@ -1290,5 +1300,12 @@ mod tests {
             fqdn: "X._airplay._tcp.local.".into(),
         };
         assert!(event_matches_filter(&event, None));
+    }
+
+    #[test]
+    fn cli_parses_no_dns_sd_global_flag() {
+        let c = Cli::try_parse_from(["whodis", "--no-dns-sd", "probe", "_airplay._tcp.local."])
+            .expect("parse");
+        assert!(c.no_dns_sd);
     }
 }

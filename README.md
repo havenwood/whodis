@@ -56,6 +56,10 @@ whodis probe _airplay._tcp.local. --instance "Living" # one specific instance
 whodis probe --host OfficePrinter.local               # resolve a hostname
 ```
 
+### Apple services (AirPlay, RAOP, HAP, ...)
+
+macOS routes many Bonjour services through AWDL and the `mDNSResponder` cache rather than broadcasting on en0; wire-level probes for `_airplay._tcp`, `_raop._tcp`, `_hap._tcp`, and related types often return nothing even when devices are active. When wire probing returns empty for a known Apple service type, whodis automatically falls back to querying `mDNSResponder` directly via `dns_sd.h`. Pass `--no-dns-sd` to suppress this fallback and keep results to wire-level evidence only.
+
 ## Enum
 
 Pick one host, list every service it advertises. With no host, lists hosts on the LAN with the count of distinct service types each one advertises.
