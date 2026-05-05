@@ -14,7 +14,7 @@ mod error;
 mod hickory_compat;
 mod mode;
 mod name_util;
-mod oui;
+pub mod oui;
 mod output;
 mod relay;
 mod report;

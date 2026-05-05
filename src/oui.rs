@@ -6,7 +6,7 @@ include!(concat!(env!("OUT_DIR"), "/oui_table.rs"));
 ///
 /// Returns `None` for locally-administered or unassigned OUIs.
 #[must_use]
-pub(crate) fn lookup(mac: [u8; 6]) -> Option<&'static str> {
+pub fn lookup(mac: [u8; 6]) -> Option<&'static str> {
     let [o0, o1, o2, ..] = mac;
     let key = (u32::from(o0) << 16) | (u32::from(o1) << 8) | u32::from(o2);
     let idx = OUI_TABLE.partition_point(|(k, _)| *k < key);

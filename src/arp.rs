@@ -17,7 +17,7 @@ use crate::types::NeighborEntry;
 ///
 /// Skips `(incomplete)` and `(unreachable)` entries, broadcast / multicast MACs,
 /// and the IPv4 broadcast address `255.255.255.255`.
-pub(crate) async fn read_neighbors() -> anyhow::Result<Vec<NeighborEntry>> {
+pub async fn read_neighbors() -> anyhow::Result<Vec<NeighborEntry>> {
     let (v4_out, v6_out) = tokio::try_join!(run_arp(), run_ndp())?;
     let mut entries = Vec::new();
     parse_arp_output(&v4_out, &mut entries);
