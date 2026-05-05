@@ -92,7 +92,11 @@ pub async fn probe_instance(
     opts: &ProbeOptions,
 ) -> Result<Vec<Instance>> {
     let transport = Transport::build(Mode::Listen)?;
-    let fqdn = format!("{}.{}", instance_name, service.fqdn());
+    let fqdn = format!(
+        "{}.{}",
+        crate::name_util::escape_label(instance_name),
+        service.fqdn()
+    );
     let qname = parse_name(&fqdn)?;
     let mut msg = build_query(&qname, RecordType::SRV);
     let mut txt_q = Query::query(qname, RecordType::TXT);
@@ -847,6 +851,14 @@ mod tests {
             txt: BTreeMap::new(),
         };
         assert_eq!(inst.fqdn(), "v1\\.0 Speaker._airplay._tcp.local.");
+    }
+
+    #[test]
+    fn probe_instance_escapes_dots_in_instance_name() {
+        let svc = ServiceType::new("_airplay", Protocol::Tcp);
+        let escaped = crate::name_util::escape_label("v1.0 Speaker");
+        let fqdn = format!("{}.{}", escaped, svc.fqdn());
+        assert_eq!(fqdn, "v1\\.0 Speaker._airplay._tcp.local.");
     }
 
     #[test]
