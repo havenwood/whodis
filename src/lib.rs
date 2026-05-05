@@ -16,10 +16,10 @@ mod mode;
 mod name_util;
 pub mod oui;
 mod output;
-mod relay;
+pub mod relay;
 mod report;
 pub mod scope;
-mod spoof_table;
+pub mod spoof_table;
 mod transport;
 mod types;
 

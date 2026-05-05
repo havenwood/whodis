@@ -67,7 +67,7 @@ fn default_ttl() -> u32 {
     120
 }
 
-pub(crate) fn load(toml_src: &str) -> anyhow::Result<AnswerTable> {
+pub fn load(toml_src: &str) -> anyhow::Result<AnswerTable> {
     let raw: Raw = toml::from_str(toml_src).context("parsing spoof table TOML")?;
     let mut b = AnswerTableBuilder::new().ttl(raw.ttl);
     for entry in raw.answers {

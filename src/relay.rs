@@ -14,11 +14,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::{Error, Result};
 
-pub(crate) async fn run(
-    ports: &[u16],
-    target: SocketAddr,
-    cancel: CancellationToken,
-) -> Result<()> {
+pub async fn run(ports: &[u16], target: SocketAddr, cancel: CancellationToken) -> Result<()> {
     if ports.is_empty() {
         tracing::warn!("relay enabled but spoof table has no SRV records to listen on");
         return Ok(());
