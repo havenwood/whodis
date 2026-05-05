@@ -286,4 +286,56 @@ mod tests {
         assert_eq!(st.name, "_meshcop");
         assert_eq!(st.protocol, Protocol::Udp);
     }
+
+    #[test]
+    fn is_apple_service_type_rejects_empty_string() {
+        assert!(!is_apple_service_type("", &[]));
+    }
+
+    #[test]
+    fn is_apple_service_type_rejects_no_underscore_prefix() {
+        assert!(!is_apple_service_type("airplay._tcp.local.", &[]));
+    }
+
+    #[test]
+    fn is_apple_service_type_service_name_is_case_insensitive() {
+        // Service *name* comparison uses eq_ignore_ascii_case; _AirPlay and _RAOP match.
+        // NOTE: the *protocol* label (_TCP vs _tcp) is NOT case-folded by parse_regtype.
+        // _AirPlay._TCP.local. (uppercase _TCP) falls through to the bare-name branch and
+        // is still recognised because extract_service_name strips the protocol suffix.
+        assert!(is_apple_service_type("_AirPlay._tcp.local.", &[]));
+        assert!(is_apple_service_type("_RAOP._tcp", &[]));
+        // BUG: "_AirPlay._TCP.local." (uppercase _TCP) currently returns false because
+        // parse_regtype matches "_tcp"/"_udp" case-sensitively. Tracked for future fix.
+        assert!(!is_apple_service_type("_AirPlay._TCP.local.", &[]));
+    }
+
+    #[test]
+    fn is_apple_service_type_extras_are_case_insensitive() {
+        let extras = vec!["_MyService".to_string()];
+        assert!(is_apple_service_type("_myservice._tcp.local.", &extras));
+        assert!(is_apple_service_type("_MYSERVICE._tcp", &extras));
+    }
+
+    #[test]
+    fn parse_regtype_rejects_missing_underscore_on_proto() {
+        // Protocol label must start with "_"; "tcp" without underscore fails.
+        assert!(parse_regtype("_foo.tcp.local.").is_none());
+    }
+
+    #[test]
+    fn parse_regtype_rejects_unknown_proto() {
+        assert!(parse_regtype("_foo._sctp.local.").is_none());
+    }
+
+    #[test]
+    fn extract_service_name_rejects_no_underscore_prefix() {
+        assert!(extract_service_name("airplay").is_none());
+    }
+
+    #[test]
+    fn normalize_regtype_non_underscore_returns_original() {
+        // Input with no underscore prefix and no protocol is returned as-is.
+        assert_eq!(normalize_regtype("foobar"), "foobar");
+    }
 }

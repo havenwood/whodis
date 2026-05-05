@@ -279,4 +279,77 @@ fe80::1%en0                             a4:83:e7:11:22:33    en0 permanent R
         let entry = entries.first().expect("first entry");
         assert_eq!(entry.ip, "fe80::1".parse::<IpAddr>().expect("addr"));
     }
+
+    #[test]
+    fn empty_arp_output_produces_no_entries() {
+        let mut entries = Vec::new();
+        parse_arp_output("", &mut entries);
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn empty_ndp_output_produces_no_entries() {
+        let mut entries = Vec::new();
+        parse_ndp_output("", &mut entries);
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn arp_line_with_trailing_whitespace_parses() {
+        let line = "? (192.168.1.1) at a4:83:e7:11:22:33 on en0 ifscope [ethernet]   ";
+        let entry = parse_arp_line(line).expect("should parse");
+        assert_eq!(entry.ip, "192.168.1.1".parse::<IpAddr>().expect("addr"));
+    }
+
+    #[test]
+    fn arp_line_missing_at_keyword_returns_none() {
+        // No "at" keyword after the IP
+        let line = "? (192.168.1.1) a4:83:e7:11:22:33 on en0 ifscope [ethernet]";
+        assert!(parse_arp_line(line).is_none());
+    }
+
+    #[test]
+    fn arp_line_missing_question_mark_prefix_returns_none() {
+        let line = "192.168.1.1 at a4:83:e7:11:22:33 on en0 ifscope [ethernet]";
+        assert!(parse_arp_line(line).is_none());
+    }
+
+    #[test]
+    fn mixed_valid_and_invalid_arp_lines_only_keeps_valid() {
+        let output = "\
+? (192.168.1.1) at a4:83:e7:11:22:33 on en0 ifscope [ethernet]
+this line is garbage and should be skipped
+? (192.168.1.2) at b8:27:eb:aa:bb:cc on en0 ifscope [ethernet]
+";
+        let mut entries = Vec::new();
+        parse_arp_output(output, &mut entries);
+        assert_eq!(entries.len(), 2);
+    }
+
+    #[test]
+    fn ndp_line_with_lo0_zone_id_strips_correctly() {
+        let line = "fe80::1%lo0                             a4:83:e7:11:22:33    lo0 permanent R";
+        let entry = parse_ndp_line(line).expect("should parse");
+        assert_eq!(entry.ip, "fe80::1".parse::<IpAddr>().expect("addr"));
+        assert_eq!(entry.interface, "lo0");
+    }
+
+    #[test]
+    fn ndp_skips_ipv6_multicast_mac() {
+        // 33:33:xx is the IPv6 multicast MAC prefix
+        let line = "ff02::1%en0                             33:33:00:00:00:01    en0 permanent R";
+        assert!(parse_ndp_line(line).is_none());
+    }
+
+    #[test]
+    fn arp_line_broadcast_ip_returns_none() {
+        let line = "? (255.255.255.255) at ff:ff:ff:ff:ff:ff on en0 ifscope [ethernet]";
+        assert!(parse_arp_line(line).is_none());
+    }
+
+    #[test]
+    fn ndp_header_line_produces_no_entry() {
+        let line = "Neighbor                                Linklayer Address  Netif Expire    St Flgs Prbs";
+        assert!(parse_ndp_line(line).is_none());
+    }
 }

@@ -136,4 +136,68 @@ mod tests {
         std::fs::create_dir_all(&p).expect("create temp");
         p
     }
+
+    #[test]
+    fn malformed_toml_returns_error() {
+        let bad = "allow_subnet = [[[not valid toml";
+        let result: Result<Scope, _> = toml::from_str(bad);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn scope_load_missing_file_returns_error() {
+        let result = Scope::load(std::path::Path::new("/nonexistent/path/scope.toml"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parses_ipv6_in_allow_subnet() {
+        let toml = r#"allow_subnet = ["fd00::/8", "10.0.0.0/8"]"#;
+        let s: Scope = toml::from_str(toml).expect("parse");
+        assert_eq!(s.allow_subnet.len(), 2);
+        let v6 = s.allow_subnet.first().expect("first").to_string();
+        assert!(v6.contains(':'), "expected IPv6, got {v6}");
+    }
+
+    #[test]
+    fn empty_arrays_explicit_parse_as_empty() {
+        let toml = r"
+            allow_subnet = []
+            allow_instance = []
+            apple_services = []
+        ";
+        let s: Scope = toml::from_str(toml).expect("parse");
+        assert!(s.allow_subnet.is_empty());
+        assert!(s.allow_instance.is_empty());
+        assert!(s.apple_services.is_empty());
+    }
+
+    #[test]
+    fn all_four_fields_parse_correctly() {
+        let toml = r#"
+            allow_subnet   = ["192.168.0.0/16"]
+            allow_instance = ["LivingRoomTV"]
+            log_dir        = "/tmp/engagement"
+            apple_services = ["_apple-custom"]
+        "#;
+        let s: Scope = toml::from_str(toml).expect("parse");
+        assert_eq!(s.allow_subnet.len(), 1);
+        assert_eq!(s.allow_instance, vec!["LivingRoomTV".to_string()]);
+        assert_eq!(s.log_dir(), Some(std::path::Path::new("/tmp/engagement")));
+        assert_eq!(s.apple_services(), &["_apple-custom".to_string()]);
+    }
+
+    #[test]
+    fn into_auth_with_empty_extras_still_applies_scope() {
+        let s = Scope {
+            allow_subnet: vec!["172.16.0.0/12".parse().expect("net")],
+            allow_instance: vec!["Office".into()],
+            log_dir: None,
+            apple_services: Vec::new(),
+        };
+        let auth = s.into_auth(vec![], vec![]);
+        assert!(auth.permits_addr("172.16.5.1".parse().expect("addr")));
+        assert!(auth.permits_instance("Office"));
+        assert!(!auth.permits_instance("Unknown"));
+    }
 }

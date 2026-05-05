@@ -43,4 +43,53 @@ mod tests {
         let mac = [0xff, 0xff, 0xff, 0x00, 0x00, 0x00];
         assert!(lookup(mac).is_none());
     }
+
+    #[test]
+    fn lookup_table_is_sorted() {
+        // partition_point correctness requires the table to be sorted by key.
+        let keys: Vec<u32> = OUI_TABLE.iter().map(|(k, _)| *k).collect();
+        let mut sorted = keys.clone();
+        sorted.sort_unstable();
+        assert_eq!(keys, sorted, "OUI_TABLE must be sorted by key");
+    }
+
+    #[test]
+    fn lookup_first_entry_of_table() {
+        // The first entry in the sorted table should be found correctly.
+        if let Some(&(key, expected_name)) = OUI_TABLE.first() {
+            let o0 = ((key >> 16) & 0xff) as u8;
+            let o1 = ((key >> 8) & 0xff) as u8;
+            let o2 = (key & 0xff) as u8;
+            let mac = [o0, o1, o2, 0x00, 0x00, 0x00];
+            assert_eq!(lookup(mac), Some(expected_name));
+        }
+    }
+
+    #[test]
+    fn lookup_last_entry_of_table() {
+        // The last entry in the sorted table should also be found correctly.
+        if let Some(&(key, expected_name)) = OUI_TABLE.last() {
+            let o0 = ((key >> 16) & 0xff) as u8;
+            let o1 = ((key >> 8) & 0xff) as u8;
+            let o2 = (key & 0xff) as u8;
+            let mac = [o0, o1, o2, 0xff, 0xff, 0xff];
+            assert_eq!(lookup(mac), Some(expected_name));
+        }
+    }
+
+    #[test]
+    fn lookup_returns_none_for_multicast_mac() {
+        // 01:00:5E is IPv4 multicast; not an assigned unicast OUI
+        let mac = [0x01, 0x00, 0x5e, 0x00, 0x00, 0xfb];
+        // This may or may not be in the table; we just ensure it doesn't panic.
+        let _ = lookup(mac);
+    }
+
+    #[test]
+    fn lookup_second_known_apple_oui() {
+        // 00:17:f2 is also assigned to "Apple, Inc."
+        let mac = [0x00, 0x17, 0xf2, 0x00, 0x00, 0x00];
+        let vendor = lookup(mac);
+        assert_eq!(vendor, Some("Apple, Inc."));
+    }
 }

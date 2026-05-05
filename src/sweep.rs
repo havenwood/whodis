@@ -411,4 +411,78 @@ mod tests {
         assert!(!probe.alive);
         assert_eq!(probe.rtt, None);
     }
+
+    #[test]
+    fn is_echo_reply_returns_false_for_truncated_buffer() {
+        // Buffer shorter than 28 bytes (IPv4 hdr + ICMP hdr) must return false.
+        let buf = [0u8; 19]; // less than HDR (20)
+        assert!(!is_echo_reply(&buf, 0, 0));
+
+        let buf = [0u8; 20]; // exactly HDR, still too short
+        assert!(!is_echo_reply(&buf, 0, 0));
+
+        let buf = [0u8; 27]; // one byte short of MIN (28)
+        assert!(!is_echo_reply(&buf, 0, 0));
+    }
+
+    #[test]
+    fn is_echo_reply_returns_false_for_wrong_icmp_type() {
+        // type=8 is echo request bouncing back - should not match
+        let mut buf = [0u8; 28];
+        buf[20] = 8; // echo request, not reply
+        buf[21] = 0;
+        buf[24] = 0x00;
+        buf[25] = 0x01;
+        buf[26] = 0x00;
+        buf[27] = 0x00;
+        assert!(!is_echo_reply(&buf, 0x0001, 0x0000));
+    }
+
+    #[test]
+    fn is_echo_reply_returns_false_for_nonzero_code() {
+        // type=0 but code != 0 should not match
+        let mut buf = [0u8; 28];
+        buf[20] = 0; // echo reply type
+        buf[21] = 1; // non-zero code
+        buf[24] = 0xab;
+        buf[25] = 0xcd;
+        buf[26] = 0x00;
+        buf[27] = 0x01;
+        assert!(!is_echo_reply(&buf, 0xabcd, 0x0001));
+    }
+
+    #[test]
+    fn icmp_checksum_is_reproducible_on_known_payload() {
+        // For an all-zeros 8-byte packet, checksum must be 0xffff.
+        let pkt = [0u8; 8];
+        assert_eq!(icmp_checksum(&pkt), 0xffff);
+    }
+
+    #[test]
+    fn icmp_checksum_over_complete_packet_is_zero() {
+        // After embedding the checksum, verifying over the full packet must yield 0.
+        for (id, seq) in [(0u16, 0u16), (0xffff, 0xffff), (0x1234, 0x5678)] {
+            let pkt = build_echo_packet(id, seq);
+            assert_eq!(
+                icmp_checksum(&pkt),
+                0,
+                "checksum re-verify failed for id={id:#06x} seq={seq:#06x}"
+            );
+        }
+    }
+
+    #[test]
+    fn is_echo_reply_requires_seq_match() {
+        let mut buf = [0u8; 28];
+        buf[20] = 0;
+        buf[21] = 0;
+        buf[24] = 0x00;
+        buf[25] = 0x01; // id=1
+        buf[26] = 0x00;
+        buf[27] = 0x02; // seq=2
+        // correct id, wrong seq
+        assert!(!is_echo_reply(&buf, 0x0001, 0x0003));
+        // both correct
+        assert!(is_echo_reply(&buf, 0x0001, 0x0002));
+    }
 }

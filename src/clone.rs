@@ -344,4 +344,57 @@ mod tests {
         };
         assert!(c.is_empty());
     }
+
+    #[test]
+    fn parse_instance_with_embedded_dot_in_instance_label() {
+        // An instance name with a real dot inside the label (e.g., "v1.0 Speaker")
+        // causes the naive split('.') to mis-count labels. parse_instance should still
+        // return the service fqdn based on the last three dot-separated tokens.
+        let p = parse_instance("v1.0 Speaker._airplay._tcp.local.").expect("parse");
+        assert_eq!(p.service_fqdn, "_airplay._tcp.local.");
+    }
+
+    #[test]
+    fn toml_quote_escapes_control_characters() {
+        // Characters below 0x20 (other than \n and \t) should be escaped as \uXXXX.
+        let s = toml_quote("\x01");
+        assert_eq!(s, "\"\\u0001\"");
+    }
+
+    #[test]
+    fn toml_quote_escapes_newline_and_tab() {
+        assert_eq!(toml_quote("a\nb"), "\"a\\nb\"");
+        assert_eq!(toml_quote("a\tb"), "\"a\\tb\"");
+    }
+
+    #[test]
+    fn to_toml_with_zero_ttl_uses_default() {
+        let c = ClonedInstance {
+            instance_fqdn: "Bar._airplay._tcp.local.".into(),
+            service_fqdn: "_airplay._tcp.local.".into(),
+            host: Some("Bar.local.".into()),
+            port: Some(7000),
+            ttl: 0, // should become 4500
+            ..Default::default()
+        };
+        let s = c.to_toml();
+        assert!(s.contains("ttl = 4500"), "expected default ttl, got: {s}");
+    }
+
+    #[test]
+    fn to_toml_omits_srv_when_host_or_port_missing() {
+        let c = ClonedInstance {
+            instance_fqdn: "Baz._airplay._tcp.local.".into(),
+            service_fqdn: "_airplay._tcp.local.".into(),
+            host: None, // no host
+            port: Some(7000),
+            ttl: 4500,
+            ..Default::default()
+        };
+        let s = c.to_toml();
+        assert!(
+            !s.contains("qtype = \"SRV\""),
+            "SRV should be absent without host"
+        );
+    }
 }

@@ -863,6 +863,49 @@ mod tests {
     }
 
     #[test]
+    fn parse_service_type_from_owner_returns_none_for_too_few_labels() {
+        // Only 3 labels: missing the instance label, so n < 4.
+        let name = crate::name_util::lax_from_str("_airplay._tcp.local.").expect("name");
+        assert!(parse_service_type_from_owner(&name).is_none());
+    }
+
+    #[test]
+    fn parse_service_type_from_owner_returns_none_for_unknown_proto() {
+        let labels: Vec<&[u8]> = vec![
+            b"Foo".as_slice(),
+            b"_airplay".as_slice(),
+            b"_sctp".as_slice(), // not _tcp or _udp
+            b"local".as_slice(),
+        ];
+        let name = Name::from_labels(labels).expect("name");
+        assert!(parse_service_type_from_owner(&name).is_none());
+    }
+
+    #[test]
+    fn parse_service_type_from_owner_returns_none_for_non_local_tld() {
+        let labels: Vec<&[u8]> = vec![
+            b"Foo".as_slice(),
+            b"_airplay".as_slice(),
+            b"_tcp".as_slice(),
+            b"example".as_slice(), // not "local"
+        ];
+        let name = Name::from_labels(labels).expect("name");
+        assert!(parse_service_type_from_owner(&name).is_none());
+    }
+
+    #[test]
+    fn parse_service_type_from_owner_returns_none_for_svc_without_underscore() {
+        let labels: Vec<&[u8]> = vec![
+            b"Foo".as_slice(),
+            b"airplay".as_slice(), // missing leading _
+            b"_tcp".as_slice(),
+            b"local".as_slice(),
+        ];
+        let name = Name::from_labels(labels).expect("name");
+        assert!(parse_service_type_from_owner(&name).is_none());
+    }
+
+    #[test]
     fn matches_host_strips_dot_and_lowercases() {
         assert!(matches_host("BedroomTV.local.", "bedroomtv.local"));
         assert!(!matches_host("OtherHost.local.", "bedroomtv.local"));

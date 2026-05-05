@@ -81,4 +81,49 @@ mod tests {
             "Shannon's MacBook Pro"
         );
     }
+
+    #[test]
+    fn escape_label_empty_string_returns_empty() {
+        assert_eq!(escape_label(""), "");
+    }
+
+    #[test]
+    fn escape_label_only_dots_escapes_all() {
+        assert_eq!(escape_label("..."), "\\.\\.\\.");
+    }
+
+    #[test]
+    fn escape_label_only_backslashes_escapes_all() {
+        assert_eq!(escape_label("\\\\"), "\\\\\\\\");
+    }
+
+    #[test]
+    fn escape_label_control_chars_pass_through() {
+        // Control characters (newline, tab) are not dots or backslashes;
+        // they pass through unchanged.
+        assert_eq!(escape_label("a\nb"), "a\nb");
+        assert_eq!(escape_label("a\tb"), "a\tb");
+    }
+
+    #[test]
+    fn escape_label_mixed_dots_and_backslashes() {
+        // "a.b\\c" should become "a\.b\\c"
+        assert_eq!(escape_label("a.b\\c"), "a\\.b\\\\c");
+    }
+
+    #[test]
+    fn escape_label_unicode_passes_through_unchanged() {
+        let input = "Shannon\u{2019}s \u{00e9}l\u{00e8}ve";
+        assert_eq!(escape_label(input), input);
+    }
+
+    #[test]
+    fn lax_from_str_rejects_null_byte() {
+        assert!(lax_from_str("foo\0bar").is_err());
+    }
+
+    #[test]
+    fn lax_from_str_rejects_only_dots() {
+        assert!(lax_from_str("....").is_err());
+    }
 }
