@@ -26,17 +26,34 @@ pub(crate) const APPLE_SERVICES: &[&str] = &[
     "_meshcop",
 ];
 
+/// Parse a regtype string like `_foo._tcp.local.` into the `_name` and `Protocol`.
+/// Strips trailing `.`, `.local` suffix, and parses the protocol portion.
+/// Returns `None` if the input doesn't match the expected `_name._proto` shape.
+fn parse_regtype(s: &str) -> Option<(&str, Protocol)> {
+    let s = s.trim_end_matches('.');
+    let s = s.strip_suffix(".local").unwrap_or(s);
+    let (name, proto_str) = s.rsplit_once('.')?;
+    let proto = match proto_str {
+        "_tcp" => Protocol::Tcp,
+        "_udp" => Protocol::Udp,
+        _ => return None,
+    };
+    if !name.starts_with('_') {
+        return None;
+    }
+    Some((name, proto))
+}
+
 /// Normalize a service type input to just the `_name` portion (no protocol,
 /// no `.local.` suffix). Returns `None` if the input cannot be parsed.
 fn extract_service_name(service: &str) -> Option<&str> {
-    // Strip trailing dot and `.local` suffix
+    // Try to parse with protocol suffix first
+    if let Some((name, _)) = parse_regtype(service) {
+        return Some(name);
+    }
+    // Fallback: input has no protocol suffix. Check if it starts with `_`.
     let s = service.trim_end_matches('.');
     let s = s.strip_suffix(".local").unwrap_or(s);
-    // Strip `._tcp` or `._udp` suffix
-    let s = s
-        .strip_suffix("._tcp")
-        .or_else(|| s.strip_suffix("._udp"))
-        .unwrap_or(s);
     if s.starts_with('_') { Some(s) } else { None }
 }
 
@@ -55,26 +72,26 @@ pub(crate) fn is_apple_service_type(service: &str) -> bool {
 /// Returns `_name._tcp` or `_name._udp`, whichever was present, falling back
 /// to `_name._tcp` when no protocol suffix is found.
 fn normalize_regtype(service: &str) -> String {
+    if let Some((name, proto)) = parse_regtype(service) {
+        let proto_str = match proto {
+            Protocol::Tcp => "_tcp",
+            Protocol::Udp => "_udp",
+        };
+        return format!("{name}.{proto_str}");
+    }
+    // Fallback: input has no protocol suffix. If it starts with `_`, append `._tcp`.
     let s = service.trim_end_matches('.');
     let s = s.strip_suffix(".local").unwrap_or(s);
-    // Already has protocol
-    if s.ends_with("._tcp") || s.ends_with("._udp") {
-        return s.to_string();
+    if s.starts_with('_') {
+        format!("{s}._tcp")
+    } else {
+        service.to_string()
     }
-    // No protocol: default to _tcp
-    format!("{s}._tcp")
 }
 
 /// Parse a `regtype` string like `_airplay._tcp.` into a `ServiceType`.
 fn parse_service_type(regtype: &str) -> Option<ServiceType> {
-    let s = regtype.trim_end_matches('.');
-    let s = s.strip_suffix(".local").unwrap_or(s);
-    let (name, proto_str) = s.rsplit_once('.')?;
-    let proto = match proto_str {
-        "_tcp" => Protocol::Tcp,
-        "_udp" => Protocol::Udp,
-        _ => return None,
-    };
+    let (name, proto) = parse_regtype(regtype)?;
     Some(ServiceType::new(name, proto))
 }
 
