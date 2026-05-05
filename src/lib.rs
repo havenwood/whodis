@@ -18,7 +18,7 @@ pub mod oui;
 mod output;
 mod relay;
 mod report;
-mod scope;
+pub mod scope;
 mod spoof_table;
 mod transport;
 mod types;

@@ -21,19 +21,19 @@ use serde::Deserialize;
 use crate::auth::Authorization;
 
 #[derive(Debug, Clone, Default, Deserialize)]
-pub(crate) struct Scope {
+pub struct Scope {
     #[serde(default)]
-    pub(crate) allow_subnet: Vec<IpNet>,
+    pub allow_subnet: Vec<IpNet>,
     #[serde(default)]
-    pub(crate) allow_instance: Vec<String>,
+    pub allow_instance: Vec<String>,
     #[serde(default)]
-    pub(crate) log_dir: Option<PathBuf>,
+    pub log_dir: Option<PathBuf>,
     #[serde(default)]
-    pub(crate) apple_services: Vec<String>,
+    pub apple_services: Vec<String>,
 }
 
 impl Scope {
-    pub(crate) fn load(path: &Path) -> anyhow::Result<Self> {
+    pub fn load(path: &Path) -> anyhow::Result<Self> {
         let raw = std::fs::read_to_string(path)
             .with_context(|| format!("reading scope file {}", path.display()))?;
         let scope: Self = toml::from_str(&raw).context("parsing scope file")?;
@@ -43,7 +43,7 @@ impl Scope {
     /// Build an `Authorization` from this scope, then layer additional CLI-passed
     /// subnets and instances on top.
     #[must_use]
-    pub(crate) fn into_auth(
+    pub fn into_auth(
         self,
         extra_subnets: Vec<IpNet>,
         extra_instances: Vec<String>,
@@ -65,11 +65,11 @@ impl Scope {
     }
 
     #[must_use]
-    pub(crate) fn log_dir(&self) -> Option<&Path> {
+    pub fn log_dir(&self) -> Option<&Path> {
         self.log_dir.as_deref()
     }
 
-    pub(crate) fn apple_services(&self) -> &[String] {
+    pub fn apple_services(&self) -> &[String] {
         &self.apple_services
     }
 }
