@@ -46,6 +46,32 @@ pub struct SweepProbe {
     pub rtt: Option<Duration>,
 }
 
+fn open_icmp_socket() -> anyhow::Result<Socket> {
+    Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::ICMPV4)).context("open ICMP DGRAM socket")
+}
+
+fn dead_sweep_probe(ip: Ipv4Addr) -> SweepProbe {
+    SweepProbe {
+        ip,
+        alive: false,
+        rtt: None,
+    }
+}
+
+fn sweep_probe_from_result(ip: Ipv4Addr, result: anyhow::Result<Option<Duration>>) -> SweepProbe {
+    match result {
+        Ok(rtt) => SweepProbe {
+            ip,
+            alive: rtt.is_some(),
+            rtt,
+        },
+        Err(e) => {
+            tracing::debug!(ip = %ip, error = %e, "probe failed");
+            dead_sweep_probe(ip)
+        }
+    }
+}
+
 /// Send one ICMP echo request and wait for an echo reply.
 /// Returns `Some(rtt)` on success and `None` when the host does not reply.
 async fn probe_one(
@@ -56,8 +82,7 @@ async fn probe_one(
 ) -> anyhow::Result<Option<Duration>> {
     let result = timeout(t, async move {
         // Open an unprivileged ICMP DGRAM socket. Works without root on macOS.
-        let sock2 = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::ICMPV4))
-            .context("open ICMP DGRAM socket")?;
+        let sock2 = open_icmp_socket()?;
 
         let dst = SocketAddrV4::new(target, 0);
         if let Err(e) = sock2.connect(&dst.into()) {
@@ -223,6 +248,14 @@ pub(crate) fn is_echo_reply(buf: &[u8], id: u16, seq: u16) -> bool {
 pub async fn sweep(net: ipnet::Ipv4Net, opts: SweepOptions) -> anyhow::Result<Vec<SweepProbe>> {
     let id = (std::process::id() & 0xffff) as u16;
     let hosts: Vec<Ipv4Addr> = net.hosts().collect();
+    if hosts.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Fail fast for setup-level problems that make the sweep impossible, such
+    // as the platform refusing unprivileged ICMP sockets.
+    drop(open_icmp_socket()?);
+
     let t = opts.timeout;
     let max = opts.max_concurrent;
 
@@ -232,36 +265,28 @@ pub async fn sweep(net: ipnet::Ipv4Net, opts: SweepOptions) -> anyhow::Result<Ve
         None
     };
 
-    let mut join_set: JoinSet<anyhow::Result<SweepProbe>> = JoinSet::new();
+    let mut join_set: JoinSet<SweepProbe> = JoinSet::new();
 
     for (i, ip) in hosts.into_iter().enumerate() {
         let seq = (i & 0xffff) as u16;
         let sem_clone = sem.clone();
 
         join_set.spawn(async move {
-            let _permit = if let Some(s) = sem_clone {
-                Some(
-                    s.acquire_owned()
-                        .await
-                        .expect("semaphore closed unexpectedly"),
-                )
-            } else {
-                None
-            };
-            let rtt = probe_one(ip, id, seq, t).await?;
-            Ok(SweepProbe {
-                ip,
-                alive: rtt.is_some(),
-                rtt,
-            })
+            if let Some(s) = sem_clone {
+                // If the semaphore is closed (process shutting down), report
+                // the host as unreachable rather than panicking.
+                let Ok(_permit) = s.acquire_owned().await else {
+                    return dead_sweep_probe(ip);
+                };
+            }
+            sweep_probe_from_result(ip, probe_one(ip, id, seq, t).await)
         });
     }
 
     let mut results = Vec::with_capacity(join_set.len());
     while let Some(res) = join_set.join_next().await {
         match res {
-            Ok(Ok(probe)) => results.push(probe),
-            Ok(Err(e)) => return Err(e),
+            Ok(probe) => results.push(probe),
             Err(e) => tracing::debug!(error = %e, "probe task panicked"),
         }
     }
@@ -351,5 +376,39 @@ mod tests {
     fn timeout_probe_errors_are_dead_hosts() {
         let e = io::Error::from(io::ErrorKind::TimedOut);
         assert!(is_dead_probe_io_error(&e));
+    }
+
+    #[test]
+    fn sweep_probe_result_with_rtt_is_alive() {
+        let ip = "192.168.50.6".parse().expect("ip");
+        let rtt = Duration::from_millis(12);
+
+        let probe = sweep_probe_from_result(ip, Ok(Some(rtt)));
+
+        assert_eq!(probe.ip, ip);
+        assert!(probe.alive);
+        assert_eq!(probe.rtt, Some(rtt));
+    }
+
+    #[test]
+    fn sweep_probe_result_without_rtt_is_dead() {
+        let ip = "192.168.50.6".parse().expect("ip");
+
+        let probe = sweep_probe_from_result(ip, Ok(None));
+
+        assert_eq!(probe.ip, ip);
+        assert!(!probe.alive);
+        assert_eq!(probe.rtt, None);
+    }
+
+    #[test]
+    fn sweep_probe_result_error_is_dead() {
+        let ip = "192.168.50.6".parse().expect("ip");
+
+        let probe = sweep_probe_from_result(ip, Err(anyhow::anyhow!("send failed")));
+
+        assert_eq!(probe.ip, ip);
+        assert!(!probe.alive);
+        assert_eq!(probe.rtt, None);
     }
 }
