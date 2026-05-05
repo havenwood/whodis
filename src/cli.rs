@@ -380,7 +380,20 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             host,
             timeout,
         } => {
-            run_probe(renderer, service, instance, host, timeout, cli.no_dns_sd).await?;
+            let extras: Vec<String> = scope
+                .as_ref()
+                .map(|s| s.apple_services().to_vec())
+                .unwrap_or_default();
+            run_probe(
+                renderer,
+                service,
+                instance,
+                host,
+                timeout,
+                cli.no_dns_sd,
+                extras,
+            )
+            .await?;
         }
         Cmd::Spoof {
             table,
@@ -625,6 +638,7 @@ async fn run_probe(
     host: Option<String>,
     timeout: Option<u64>,
     no_dns_sd: bool,
+    extra_apple_services: Vec<String>,
 ) -> anyhow::Result<()> {
     // If no positional arg and no explicit timeout, use 8s for discovery; otherwise use defaults.
     let effective_timeout = if service.is_none() && host.is_none() {
@@ -649,7 +663,7 @@ async fn run_probe(
     let instances = if let Some(name) = instance {
         probe::probe_instance(&name, &svc, &opts).await?
     } else {
-        probe::probe_service(&svc, &opts, no_dns_sd).await?
+        probe::probe_service(&svc, &opts, no_dns_sd, &extra_apple_services).await?
     };
     for inst in instances {
         let fp = crate::fingerprint::identify(&inst);

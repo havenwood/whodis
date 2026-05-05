@@ -36,6 +36,7 @@ pub async fn probe_service(
     service: &ServiceType,
     opts: &ProbeOptions,
     no_dns_sd: bool,
+    extra_apple_services: &[String],
 ) -> Result<Vec<Instance>> {
     let transport = Transport::build(Mode::Listen)?;
     let qname = parse_name(&service.fqdn())?;
@@ -63,7 +64,7 @@ pub async fn probe_service(
     let wire_results = decode_instances(service, &records);
     if wire_results.is_empty()
         && !no_dns_sd
-        && crate::dns_sd::is_apple_service_type(&service.fqdn())
+        && crate::dns_sd::is_apple_service_type(&service.fqdn(), extra_apple_services)
     {
         let fallback = crate::dns_sd::browse_service(&service.fqdn(), opts.timeout).await;
         match fallback {

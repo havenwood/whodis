@@ -28,6 +28,8 @@ pub(crate) struct Scope {
     pub(crate) allow_instance: Vec<String>,
     #[serde(default)]
     pub(crate) log_dir: Option<PathBuf>,
+    #[serde(default)]
+    pub(crate) apple_services: Vec<String>,
 }
 
 impl Scope {
@@ -66,6 +68,10 @@ impl Scope {
     pub(crate) fn log_dir(&self) -> Option<&Path> {
         self.log_dir.as_deref()
     }
+
+    pub(crate) fn apple_services(&self) -> &[String] {
+        &self.apple_services
+    }
 }
 
 #[cfg(test)]
@@ -101,6 +107,7 @@ mod tests {
             allow_subnet: vec!["10.0.0.0/8".parse().expect("net")],
             allow_instance: vec!["Foo".into()],
             log_dir: None,
+            apple_services: Vec::new(),
         };
         let auth = s.into_auth(
             vec!["192.168.1.0/24".parse().expect("net")],
@@ -110,6 +117,18 @@ mod tests {
         assert!(auth.permits_addr("192.168.1.5".parse().expect("addr")));
         assert!(auth.permits_instance("Foo"));
         assert!(auth.permits_instance("Bar"));
+    }
+
+    #[test]
+    fn parses_apple_services_from_toml() {
+        let toml = r#"
+            apple_services = ["_apple-foo", "_apple-bar"]
+        "#;
+        let s: Scope = toml::from_str(toml).expect("parse");
+        assert_eq!(
+            s.apple_services,
+            vec!["_apple-foo".to_string(), "_apple-bar".to_string()]
+        );
     }
 
     fn tempdir_or_skip() -> std::path::PathBuf {

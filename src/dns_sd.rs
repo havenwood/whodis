@@ -57,15 +57,16 @@ fn extract_service_name(service: &str) -> Option<&str> {
     if s.starts_with('_') { Some(s) } else { None }
 }
 
-/// Return `true` if the service type belongs to the known-Apple list.
+/// Return `true` if the service type belongs to the known-Apple list or the extras list.
 /// Accepts both `_airplay._tcp.local.` and `_airplay._tcp` forms.
-pub(crate) fn is_apple_service_type(service: &str) -> bool {
+pub(crate) fn is_apple_service_type(service: &str, extras: &[String]) -> bool {
     let Some(name) = extract_service_name(service) else {
         return false;
     };
     APPLE_SERVICES
         .iter()
         .any(|&known| known.eq_ignore_ascii_case(name))
+        || extras.iter().any(|e| e.eq_ignore_ascii_case(name))
 }
 
 /// Normalize a service type string for passing to the dns-sd API.
@@ -199,42 +200,49 @@ mod tests {
 
     #[test]
     fn is_apple_service_type_recognizes_airplay_fqdn() {
-        assert!(is_apple_service_type("_airplay._tcp.local."));
+        assert!(is_apple_service_type("_airplay._tcp.local.", &[]));
     }
 
     #[test]
     fn is_apple_service_type_recognizes_raop_no_local() {
-        assert!(is_apple_service_type("_raop._tcp"));
+        assert!(is_apple_service_type("_raop._tcp", &[]));
     }
 
     #[test]
     fn is_apple_service_type_recognizes_airdrop() {
-        assert!(is_apple_service_type("_airdrop._tcp.local."));
+        assert!(is_apple_service_type("_airdrop._tcp.local.", &[]));
     }
 
     #[test]
     fn is_apple_service_type_recognizes_hap() {
-        assert!(is_apple_service_type("_hap._tcp"));
+        assert!(is_apple_service_type("_hap._tcp", &[]));
     }
 
     #[test]
     fn is_apple_service_type_recognizes_companion_link() {
-        assert!(is_apple_service_type("_companion-link._tcp.local."));
+        assert!(is_apple_service_type("_companion-link._tcp.local.", &[]));
     }
 
     #[test]
     fn is_apple_service_type_recognizes_meshcop() {
-        assert!(is_apple_service_type("_meshcop._udp.local."));
+        assert!(is_apple_service_type("_meshcop._udp.local.", &[]));
     }
 
     #[test]
     fn is_apple_service_type_rejects_googlecast() {
-        assert!(!is_apple_service_type("_googlecast._tcp.local."));
+        assert!(!is_apple_service_type("_googlecast._tcp.local.", &[]));
     }
 
     #[test]
     fn is_apple_service_type_rejects_ipp() {
-        assert!(!is_apple_service_type("_ipp._tcp.local."));
+        assert!(!is_apple_service_type("_ipp._tcp.local.", &[]));
+    }
+
+    #[test]
+    fn is_apple_service_type_recognizes_extras() {
+        let extras = vec!["_apple-foo".to_string()];
+        assert!(is_apple_service_type("_apple-foo._tcp.local.", &extras));
+        assert!(!is_apple_service_type("_apple-foo._tcp.local.", &[]));
     }
 
     #[test]
