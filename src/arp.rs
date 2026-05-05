@@ -2,6 +2,9 @@
 //!
 //! Shells out to `arp -an` (IPv4) and `ndp -an` (IPv6), parses output, and
 //! returns a deduplicated list of `NeighborEntry` records. No packets are sent.
+//!
+//! The parsers target macOS's `arp(8)` / `ndp(8)` output format. Linux's
+//! `ip neigh` produces different output and would need a separate parser.
 
 use std::net::IpAddr;
 
@@ -46,7 +49,7 @@ async fn run_ndp() -> anyhow::Result<String> {
 /// Returns `None` for `(incomplete)`, `(unreachable)`, or malformed input.
 fn parse_mac(s: &str) -> Option<[u8; 6]> {
     // macOS wraps these strings with parens for incomplete/unreachable
-    if s.starts_with('(') || s == "(incomplete)" || s == "(unreachable)" {
+    if s.starts_with('(') {
         return None;
     }
     let mut it = s.split(':');
