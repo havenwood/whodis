@@ -38,13 +38,15 @@ pub(crate) async fn run(path: &Path, timeout: u64) -> Result<usize> {
 
     let mut count = 0_usize;
     loop {
-        if let Some(d) = deadline
-            && tokio::time::Instant::now() >= d
-        {
-            break;
-        }
+        let until_deadline = async {
+            match deadline {
+                Some(d) => tokio::time::sleep_until(d).await,
+                None => std::future::pending::<()>().await,
+            }
+        };
         tokio::select! {
             () = cancel.cancelled() => break,
+            () = until_deadline => break,
             res = recv_one(v4.as_ref(), v6.as_ref()) => {
                 match res {
                     Ok(Some((payload, src))) => {
