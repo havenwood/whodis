@@ -173,16 +173,14 @@ fn format_iso8601(t: SystemTime) -> String {
     let secs = dur.as_secs();
     let when = time::OffsetDateTime::from_unix_timestamp(i64::try_from(secs).unwrap_or(0))
         .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
-    let local =
-        when.to_offset(time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC));
     format!(
-        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-        local.year(),
-        u8::from(local.month()),
-        local.day(),
-        local.hour(),
-        local.minute(),
-        local.second()
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        when.year(),
+        u8::from(when.month()),
+        when.day(),
+        when.hour(),
+        when.minute(),
+        when.second()
     )
 }
 
@@ -276,5 +274,11 @@ mod tests {
         let s = build_markdown(now, 5, &[], &[], Some("bind failed"));
         assert!(s.contains("Service-type discovery failed"));
         assert!(s.contains("bind failed"));
+    }
+
+    #[test]
+    fn format_iso8601_uses_utc_with_z_suffix() {
+        let t = UNIX_EPOCH;
+        assert_eq!(format_iso8601(t), "1970-01-01T00:00:00Z");
     }
 }
