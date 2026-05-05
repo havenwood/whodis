@@ -444,9 +444,9 @@ fn emit_sweep_pretty(color: ColorMode, results: &[SweepResult]) -> io::Result<()
 
     for r in sorted {
         let status = if r.alive {
-            paint(on, "up", GREEN)
+            paint(on, "alive", GREEN)
         } else {
-            paint(on, "down", RED)
+            paint(on, "dead", RED)
         };
         let rtt = r.rtt_ms.map_or_else(
             || "-".to_string(),

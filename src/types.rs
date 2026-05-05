@@ -39,7 +39,7 @@ fn deserialize_mac<'de, D: serde::Deserializer<'de>>(de: D) -> Result<[u8; 6], D
     Ok(mac)
 }
 
-/// Serialize `Option<Duration>` as `Option<f64>` milliseconds.
+/// Serialize `Option<Duration>` as `Option<f64>` milliseconds, rounded to 2 decimals.
 #[allow(
     clippy::trivially_copy_pass_by_ref,
     clippy::ref_option,
@@ -50,7 +50,11 @@ fn serialize_rtt_ms<S: serde::Serializer>(
     ser: S,
 ) -> Result<S::Ok, S::Error> {
     match rtt {
-        Some(d) => ser.serialize_some(&(d.as_secs_f64() * 1000.0)),
+        Some(d) => {
+            let ms = d.as_secs_f64() * 1000.0;
+            let rounded = (ms * 100.0).round() / 100.0;
+            ser.serialize_some(&rounded)
+        }
         None => ser.serialize_none(),
     }
 }
@@ -306,5 +310,22 @@ mod tests {
         };
         let s = serde_json::to_string(&inst).expect("serialize");
         assert!(s.contains("\"flags\":\"0xff0042\""), "got {s}");
+    }
+
+    #[test]
+    fn sweep_result_rtt_rounds_to_two_decimals() {
+        let result = SweepResult {
+            ip: "127.0.0.1".parse().expect("parse ip"),
+            alive: true,
+            rtt_ms: Some(std::time::Duration::from_secs_f64(0.013_384_625)),
+            mac: None,
+            vendor: None,
+            interface: None,
+        };
+        let s = serde_json::to_string(&result).expect("serialize");
+        assert!(
+            s.contains("\"rtt_ms\":13.38"),
+            "expected 13.38 in JSON, got {s}"
+        );
     }
 }
