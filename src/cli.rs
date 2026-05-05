@@ -113,43 +113,6 @@ pub enum Cmd {
         timeout: Option<u64>,
     },
 
-    /// Run an authoritative responder against the given TOML answer table.
-    Spoof {
-        /// Path to a TOML answer table. Optional when --template is given.
-        #[arg(value_name = "TABLE", required_unless_present = "template")]
-        table: Option<std::path::PathBuf>,
-
-        /// Built-in service template. Requires --name and --ip.
-        #[arg(long, value_enum, requires = "name", requires_all = ["name", "ip"])]
-        template: Option<Template>,
-
-        /// Instance name for the template (e.g. "Conf Room").
-        #[arg(long, requires = "template")]
-        name: Option<String>,
-
-        /// IPv4 address for the template A record.
-        #[arg(long, requires = "template")]
-        ip: Option<Ipv4Addr>,
-
-        #[arg(long, default_value_t = 3)]
-        burst: u8,
-
-        #[arg(long = "allow", value_name = "CIDR")]
-        allow: Vec<IpNet>,
-
-        #[arg(long = "allow-instance", value_name = "NAME")]
-        allow_instance: Vec<String>,
-
-        /// Bridge inbound TCP on spoofed ports to HOST:PORT (full MITM).
-        #[arg(long, value_name = "HOST:PORT")]
-        relay: Option<SocketAddr>,
-
-        /// Periodically multicast our spoofed records to push them into client caches.
-        /// 0 means only reply to incoming queries (default).
-        #[arg(long, value_name = "SECS", default_value_t = 0)]
-        reannounce_interval: u64,
-    },
-
     /// Enumerate every service a single host advertises. Without args, lists hosts on the LAN.
     Enum {
         /// Hostname to enumerate, e.g. `BedroomTV.local.`. Omit to discover hosts.
@@ -158,51 +121,6 @@ pub enum Cmd {
         /// Timeout in seconds. Default: 5s for targeted queries, 8s for discovery (no positional arg).
         #[arg(short = 't', long)]
         timeout: Option<u64>,
-    },
-
-    /// Send goodbye or conflict-rename floods. Disruptive.
-    Flood {
-        #[command(subcommand)]
-        kind: FloodCmd,
-    },
-
-    /// Capture mDNS traffic to a pcap file.
-    Capture {
-        /// Output pcap file path. Defaults to `mdns-{timestamp}.pcap` in the current
-        /// directory, or in `scope.log_dir` if set.
-        #[arg(long, value_name = "FILE")]
-        pcap: Option<std::path::PathBuf>,
-
-        /// Capture window in seconds. 0 = until Ctrl-C.
-        #[arg(short = 't', long, default_value_t = 0)]
-        timeout: u64,
-    },
-
-    /// Capture a real LAN instance and emit a TOML answer table mimicking it.
-    Clone {
-        /// Instance fqdn, e.g. `LivingRoomTV._airplay._tcp.local.`.
-        instance: String,
-
-        /// Listen window in seconds. Exits non-zero if no records arrive in time.
-        #[arg(short = 't', long, default_value_t = 5)]
-        timeout: u64,
-    },
-
-    /// Print shell completions for the given shell to stdout.
-    Completions {
-        /// Shell to generate completions for.
-        shell: clap_complete::Shell,
-    },
-
-    /// Generate a Markdown engagement report.
-    Report {
-        /// Output Markdown file path. If --scope sets `log_dir`, path is relative to it.
-        #[arg(long, value_name = "FILE", default_value = "engagement.md")]
-        out: std::path::PathBuf,
-
-        /// Inventory window in seconds (default 10).
-        #[arg(short = 't', long, default_value_t = 10)]
-        timeout: u64,
     },
 
     /// Read the kernel ARP/NDP caches and show neighbors with OUI vendor lookup.
@@ -249,6 +167,88 @@ pub enum Cmd {
         /// Also emit records for unreachable (dead) hosts.
         #[arg(long)]
         show_dead: bool,
+    },
+
+    /// Capture mDNS traffic to a pcap file.
+    Capture {
+        /// Output pcap file path. Defaults to `mdns-{timestamp}.pcap` in the current
+        /// directory, or in `scope.log_dir` if set.
+        #[arg(long, value_name = "FILE")]
+        pcap: Option<std::path::PathBuf>,
+
+        /// Capture window in seconds. 0 = until Ctrl-C.
+        #[arg(short = 't', long, default_value_t = 0)]
+        timeout: u64,
+    },
+
+    /// Run an authoritative responder against the given TOML answer table.
+    Spoof {
+        /// Path to a TOML answer table. Optional when --template is given.
+        #[arg(value_name = "TABLE", required_unless_present = "template")]
+        table: Option<std::path::PathBuf>,
+
+        /// Built-in service template. Requires --name and --ip.
+        #[arg(long, value_enum, requires = "name", requires_all = ["name", "ip"])]
+        template: Option<Template>,
+
+        /// Instance name for the template (e.g. "Conf Room").
+        #[arg(long, requires = "template")]
+        name: Option<String>,
+
+        /// IPv4 address for the template A record.
+        #[arg(long, requires = "template")]
+        ip: Option<Ipv4Addr>,
+
+        #[arg(long, default_value_t = 3)]
+        burst: u8,
+
+        #[arg(long = "allow", value_name = "CIDR")]
+        allow: Vec<IpNet>,
+
+        #[arg(long = "allow-instance", value_name = "NAME")]
+        allow_instance: Vec<String>,
+
+        /// Bridge inbound TCP on spoofed ports to HOST:PORT (full MITM).
+        #[arg(long, value_name = "HOST:PORT")]
+        relay: Option<SocketAddr>,
+
+        /// Periodically multicast our spoofed records to push them into client caches.
+        /// 0 means only reply to incoming queries (default).
+        #[arg(long, value_name = "SECS", default_value_t = 0)]
+        reannounce_interval: u64,
+    },
+
+    /// Capture a real LAN instance and emit a TOML answer table mimicking it.
+    Clone {
+        /// Instance fqdn, e.g. `LivingRoomTV._airplay._tcp.local.`.
+        instance: String,
+
+        /// Listen window in seconds. Exits non-zero if no records arrive in time.
+        #[arg(short = 't', long, default_value_t = 5)]
+        timeout: u64,
+    },
+
+    /// Send goodbye or conflict-rename floods. Disruptive.
+    Flood {
+        #[command(subcommand)]
+        kind: FloodCmd,
+    },
+
+    /// Generate a Markdown engagement report.
+    Report {
+        /// Output Markdown file path. If --scope sets `log_dir`, path is relative to it.
+        #[arg(long, value_name = "FILE", default_value = "engagement.md")]
+        out: std::path::PathBuf,
+
+        /// Inventory window in seconds (default 10).
+        #[arg(short = 't', long, default_value_t = 10)]
+        timeout: u64,
+    },
+
+    /// Print shell completions for the given shell to stdout.
+    Completions {
+        /// Shell to generate completions for.
+        shell: clap_complete::Shell,
     },
 }
 
