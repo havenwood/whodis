@@ -108,8 +108,9 @@ pub enum Cmd {
         #[arg(long)]
         host: Option<String>,
 
-        #[arg(short = 't', long, default_value_t = 3)]
-        timeout: u64,
+        /// Timeout in seconds. Default: 3s for targeted queries, 8s for discovery (no positional arg).
+        #[arg(short = 't', long)]
+        timeout: Option<u64>,
     },
 
     /// Run an authoritative responder against the given TOML answer table.
@@ -154,8 +155,9 @@ pub enum Cmd {
         /// Hostname to enumerate, e.g. `BedroomTV.local.`. Omit to discover hosts.
         host: Option<String>,
 
-        #[arg(short = 't', long, default_value_t = 5)]
-        timeout: u64,
+        /// Timeout in seconds. Default: 5s for targeted queries, 8s for discovery (no positional arg).
+        #[arg(short = 't', long)]
+        timeout: Option<u64>,
     },
 
     /// Send goodbye or conflict-rename floods. Disruptive.
@@ -398,8 +400,14 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             .await?;
         }
         Cmd::Enum { host, timeout } => {
+            // If no positional arg and no explicit timeout, use 8s for discovery; otherwise use defaults.
+            let effective_timeout = if host.is_none() {
+                timeout.unwrap_or(8)
+            } else {
+                timeout.unwrap_or(5)
+            };
             let opts = ProbeOptions {
-                timeout: Duration::from_secs(timeout),
+                timeout: Duration::from_secs(effective_timeout),
             };
             if let Some(host) = host {
                 let result = probe::enum_host(&host, &opts).await?;
@@ -606,10 +614,16 @@ async fn run_probe(
     service: Option<String>,
     instance: Option<String>,
     host: Option<String>,
-    timeout: u64,
+    timeout: Option<u64>,
 ) -> anyhow::Result<()> {
+    // If no positional arg and no explicit timeout, use 8s for discovery; otherwise use defaults.
+    let effective_timeout = if service.is_none() && host.is_none() {
+        timeout.unwrap_or(8)
+    } else {
+        timeout.unwrap_or(3)
+    };
     let opts = ProbeOptions {
-        timeout: Duration::from_secs(timeout),
+        timeout: Duration::from_secs(effective_timeout),
     };
     if let Some(h) = host {
         let answers = probe::probe_host(&h, &opts).await?;
@@ -998,7 +1012,12 @@ mod tests {
     fn cli_parses_probe_without_service() {
         let c = Cli::try_parse_from(["whodis", "probe"]).expect("parse");
         match c.command {
-            Cmd::Probe { service, .. } => assert!(service.is_none()),
+            Cmd::Probe {
+                service, timeout, ..
+            } => {
+                assert!(service.is_none());
+                assert!(timeout.is_none());
+            }
             other => panic!("expected Probe, got {other:?}"),
         }
     }
@@ -1019,7 +1038,7 @@ mod tests {
         match c.command {
             Cmd::Enum { host, timeout } => {
                 assert_eq!(host.as_deref(), Some("BedroomTV.local."));
-                assert_eq!(timeout, 5);
+                assert!(timeout.is_none());
             }
             other => panic!("expected Enum, got {other:?}"),
         }
@@ -1035,7 +1054,7 @@ mod tests {
         match c.command {
             Cmd::Enum { host, timeout } => {
                 assert!(host.is_none());
-                assert_eq!(timeout, 5);
+                assert!(timeout.is_none());
             }
             other => panic!("expected Enum, got {other:?}"),
         }
@@ -1052,7 +1071,7 @@ mod tests {
         match c.command {
             Cmd::Enum { host, timeout } => {
                 assert_eq!(host.as_deref(), Some("192-168-50-179.local."));
-                assert_eq!(timeout, 8);
+                assert_eq!(timeout, Some(8));
             }
             other => panic!("expected Enum, got {other:?}"),
         }
