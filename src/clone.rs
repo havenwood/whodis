@@ -15,7 +15,7 @@ use crate::mode::Mode;
 use crate::transport::{Destination, Transport};
 
 #[derive(Debug, Clone, Default)]
-pub(crate) struct ClonedInstance {
+pub struct ClonedInstance {
     pub(crate) instance_fqdn: String,
     pub(crate) service_fqdn: String,
     pub(crate) host: Option<String>,
@@ -30,7 +30,7 @@ pub(crate) struct ClonedInstance {
 
 impl ClonedInstance {
     #[must_use]
-    pub(crate) fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.host.is_none()
             && self.port.is_none()
             && self.txt.is_empty()
@@ -40,7 +40,7 @@ impl ClonedInstance {
 
     /// Format as a TOML answer table compatible with `whodis spoof <FILE>`.
     #[must_use]
-    pub(crate) fn to_toml(&self) -> String {
+    pub fn to_toml(&self) -> String {
         let mut s = String::new();
         // Using _r to satisfy `unused` lint; writeln! into a String is infallible.
         let _r = writeln!(s, "# Cloned from {}", self.instance_fqdn);
@@ -126,10 +126,7 @@ fn toml_quote(s: &str) -> String {
     out
 }
 
-pub(crate) async fn clone_instance(
-    instance_fqdn: &str,
-    timeout: Duration,
-) -> Result<ClonedInstance> {
+pub async fn clone_instance(instance_fqdn: &str, timeout: Duration) -> Result<ClonedInstance> {
     let parsed = parse_instance(instance_fqdn)?;
     // Listen mode binds 5353 with SO_REUSEPORT so we receive both multicast responses from the
     // mDNS group and unicast responses the target sends back to port 5353.
