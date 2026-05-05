@@ -172,10 +172,10 @@ pub(crate) async fn clone_instance(
     }
 
     if out.is_empty() {
-        return Err(Error::InvalidServiceType(format!(
-            "no records observed for {instance_fqdn} on the LAN within {}s",
-            timeout.as_secs()
-        )));
+        return Err(Error::NoRecords {
+            target: instance_fqdn.to_string(),
+            timeout,
+        });
     }
     Ok(out)
 }

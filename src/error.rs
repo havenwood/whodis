@@ -21,6 +21,12 @@ pub enum Error {
 
     #[error("invalid service type: {0}")]
     InvalidServiceType(String),
+
+    #[error("no records observed for {target} on the LAN within {}s", timeout.as_secs())]
+    NoRecords {
+        target: String,
+        timeout: std::time::Duration,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
