@@ -123,11 +123,14 @@ Pick a template or hand-write a TOML answer table.
 ```
 whodis spoof --template airplay --name ConferenceSpeaker --ip 10.0.5.42
 whodis spoof answers.toml --burst 3 --allow 10.0.5.0/24
+whodis spoof answers.toml --reply unicast --allow 10.0.5.23/32
 ```
 
 Templates: `airplay`, `raop`, `ipp`, `smb`, `ssh`, `googlecast`. Each generates the matching `PTR` / `SRV` / `TXT` / `A` records for the instance.
 
 `--relay HOST:PORT` adds a TCP bridge: whodis listens on every port the spoof advertises and forwards connections to the real device. Combine with `flood conflict` for discovery plus traffic MITM.
+
+`--reply multicast|unicast|auto` chooses where query-triggered answers go: LAN-wide multicast (default), direct unicast to the querying client, or auto-unicast only when requested.
 
 `--reannounce-interval SECS` periodically multicasts our records to evict cached entries from the legit device. `0` is reply-only (default). Try 30 for steady churn, 5 for aggressive cache-poisoning.
 

@@ -11,7 +11,7 @@ use hickory_proto::rr::rdata::{A, PTR, SRV, TXT};
 use hickory_proto::rr::{DNSClass, Name, RData, Record, RecordType};
 use hickory_proto::serialize::binary::BinEncodable;
 use whodis::Mode;
-use whodis::spoof::{AnswerTable, AnswerTableBuilder, Responder};
+use whodis::spoof::{AnswerTable, AnswerTableBuilder, ReplyMode, Responder};
 
 pub(crate) const TEST_GROUP_V4: Ipv4Addr = Ipv4Addr::new(239, 255, 99, 99);
 pub(crate) const TEST_GROUP_V6: Ipv6Addr = Ipv6Addr::new(0xff12, 0, 0, 0, 0, 0, 0, 0xabcd);
@@ -59,7 +59,15 @@ pub(crate) fn fake_appletv_table() -> AnswerTable {
 }
 
 pub(crate) fn spawn_test_responder(table: AnswerTable) -> Responder {
-    Responder::new(test_mode(), whodis::Authorization::new(), table, 1, None).expect("responder")
+    Responder::new(
+        test_mode(),
+        whodis::Authorization::new(),
+        table,
+        1,
+        ReplyMode::Multicast,
+        None,
+    )
+    .expect("responder")
 }
 
 /// Build and send a single mDNS response containing PTR + SRV + TXT + A records

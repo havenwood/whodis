@@ -26,10 +26,9 @@ fn iface_allowed(name: &str) -> bool {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Destination {
     Multicast,
-    #[allow(dead_code, reason = "reserved for directed mDNS responses")]
     Unicast(SocketAddr),
 }
 

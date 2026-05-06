@@ -5,6 +5,7 @@ use hickory_proto::rr::rdata::{SRV, TXT};
 use hickory_proto::rr::{DNSClass, Name, RData, Record};
 
 pub(crate) trait MessageExt {
+    fn id(&self) -> u16;
     fn message_type(&self) -> MessageType;
     fn queries(&self) -> &[Query];
     fn answers(&self) -> &[Record];
@@ -17,6 +18,10 @@ pub(crate) trait MessageExt {
 }
 
 impl MessageExt for Message {
+    fn id(&self) -> u16 {
+        self.metadata.id
+    }
+
     fn message_type(&self) -> MessageType {
         self.metadata.message_type
     }

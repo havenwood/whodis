@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use hickory_proto::op::{Message, MessageType, OpCode, ResponseCode};
+use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
 use hickory_proto::rr::{DNSClass, Name, RData, Record, RecordType};
 use hickory_proto::serialize::binary::{BinDecodable, BinEncodable};
 use tokio_util::sync::CancellationToken;
@@ -16,6 +16,17 @@ use crate::mode::Mode;
 use crate::transport::{Destination, Transport};
 
 const DEFAULT_TTL: u32 = 120;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+pub enum ReplyMode {
+    /// Reply via mDNS multicast. This preserves the original whodis behavior.
+    Multicast,
+    /// Reply directly to the querying source address and port.
+    Unicast,
+    /// Unicast only when the query sets the mDNS unicast-response bit.
+    Auto,
+}
 
 #[derive(Debug, Clone)]
 pub struct AnswerEntry {
@@ -240,6 +251,16 @@ pub(crate) struct ResponseEntry {
     pub(crate) auth_names: Vec<String>,
 }
 
+impl ResponseEntry {
+    fn bytes_for_request_id(&self, request_id: u16) -> Vec<u8> {
+        let mut bytes = self.bytes.clone();
+        if let Some(header_id) = bytes.get_mut(..2) {
+            header_id.copy_from_slice(&request_id.to_be_bytes());
+        }
+        bytes
+    }
+}
+
 impl AnswerTable {
     pub(crate) fn iter_responses(&self) -> impl Iterator<Item = &[u8]> {
         self.map.values().map(|response| response.bytes.as_slice())
@@ -281,6 +302,7 @@ pub struct Responder {
     auth: Authorization,
     table: Arc<AnswerTable>,
     burst: u8,
+    reply_mode: ReplyMode,
     reannounce_interval: Option<Duration>,
     cancel: CancellationToken,
     event_callback: Option<Arc<dyn Fn(ResponderEvent) + Send + Sync>>,
@@ -306,6 +328,7 @@ impl Responder {
         auth: Authorization,
         table: AnswerTable,
         burst: u8,
+        reply_mode: ReplyMode,
         reannounce_interval: Option<Duration>,
     ) -> Result<Self> {
         if !mode.sends_responses() {
@@ -320,6 +343,7 @@ impl Responder {
             auth,
             table: Arc::new(table),
             burst: burst.max(1),
+            reply_mode,
             reannounce_interval,
             cancel: CancellationToken::new(),
             event_callback: None,
@@ -405,19 +429,26 @@ impl Responder {
                 {
                     continue;
                 }
+                let dest = response_destination(self.reply_mode, q, src);
+                let bytes = match dest {
+                    Destination::Unicast(_) => response.bytes_for_request_id(msg.id()),
+                    Destination::Multicast => response.bytes.clone(),
+                };
                 for i in 0..self.burst {
-                    if let Err(e) = self
-                        .transport
-                        .send_query(&response.bytes, Destination::Multicast)
-                        .await
-                    {
+                    if let Err(e) = self.transport.send_query(&bytes, dest).await {
                         tracing::debug!(error = %e, "send failed");
                     }
                     if i + 1 < self.burst {
                         tokio::time::sleep(Duration::from_micros(500)).await;
                     }
                 }
-                tracing::info!(query = %name, qtype = ?q.query_type(), %src, "spoofed");
+                tracing::info!(
+                    query = %name,
+                    qtype = ?q.query_type(),
+                    %src,
+                    reply = ?self.reply_mode,
+                    "spoofed"
+                );
                 self.emit_event(ResponderEvent::QueryAnswered {
                     name,
                     qtype: q.query_type(),
@@ -453,6 +484,14 @@ impl Responder {
         if let Some(callback) = &self.event_callback {
             callback(event);
         }
+    }
+}
+
+fn response_destination(mode: ReplyMode, query: &Query, src: std::net::SocketAddr) -> Destination {
+    match mode {
+        ReplyMode::Unicast => Destination::Unicast(src),
+        ReplyMode::Auto if query.mdns_unicast_response() => Destination::Unicast(src),
+        ReplyMode::Multicast | ReplyMode::Auto => Destination::Multicast,
     }
 }
 
@@ -654,6 +693,102 @@ mod tests {
         );
     }
 
+    #[test]
+    fn response_destination_auto_follows_query_unicast_bit() {
+        let src = std::net::SocketAddr::from((Ipv4Addr::new(10, 0, 0, 2), 5353));
+        let mut query = Query::query(Name::from_utf8("our.local.").expect("name"), RecordType::A);
+
+        assert_eq!(
+            response_destination(ReplyMode::Auto, &query, src),
+            Destination::Multicast
+        );
+
+        query.set_mdns_unicast_response(true);
+        assert_eq!(
+            response_destination(ReplyMode::Auto, &query, src),
+            Destination::Unicast(src)
+        );
+    }
+
+    #[test]
+    fn explicit_response_destinations_ignore_query_unicast_bit() {
+        let src = std::net::SocketAddr::from((Ipv4Addr::new(10, 0, 0, 2), 5353));
+        let mut query = Query::query(Name::from_utf8("our.local.").expect("name"), RecordType::A);
+        query.set_mdns_unicast_response(true);
+
+        assert_eq!(
+            response_destination(ReplyMode::Multicast, &query, src),
+            Destination::Multicast
+        );
+        assert_eq!(
+            response_destination(ReplyMode::Unicast, &query, src),
+            Destination::Unicast(src)
+        );
+    }
+
+    #[test]
+    fn unicast_response_bytes_copy_request_id() {
+        let response = ResponseEntry {
+            bytes: vec![0, 0, 0x84, 0, 0, 0, 0, 1, 0, 0, 0, 0],
+            auth_names: Vec::new(),
+        };
+
+        let bytes = response.bytes_for_request_id(0x1234);
+
+        assert_eq!(bytes.get(0..2), Some(&[0x12, 0x34][..]));
+    }
+
+    #[tokio::test]
+    async fn unicast_reply_reaches_querying_socket() {
+        let table = AnswerTableBuilder::new()
+            .answer(
+                "our.local.",
+                RecordType::A,
+                RData::A(A(Ipv4Addr::new(1, 2, 3, 4))),
+            )
+            .expect("answer")
+            .build();
+        let responder = Responder::new(
+            Mode::Custom {
+                group_v4: Ipv4Addr::new(239, 255, 99, 99),
+                group_v6: std::net::Ipv6Addr::LOCALHOST,
+                port: 15356,
+            },
+            Authorization::new(),
+            table,
+            1,
+            ReplyMode::Unicast,
+            None,
+        )
+        .expect("responder");
+        let receiver =
+            tokio::net::UdpSocket::bind(std::net::SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+                .await
+                .expect("bind receiver");
+        let src = receiver.local_addr().expect("receiver addr");
+
+        let mut query = Message::new(0x1234, MessageType::Query, OpCode::Query);
+        query.add_query(Query::query(
+            Name::from_utf8("our.local.").expect("name"),
+            RecordType::A,
+        ));
+
+        responder.handle_query(query, src).await;
+
+        let mut buf = [0_u8; 2048];
+        let (n, _) = tokio::time::timeout(Duration::from_secs(1), receiver.recv_from(&mut buf))
+            .await
+            .expect("timed out waiting for unicast reply")
+            .expect("receive reply");
+        let payload = buf.get(..n).expect("reply payload");
+        let parsed = Message::from_bytes(payload).expect("parse reply");
+
+        assert_eq!(parsed.id(), 0x1234);
+        assert_eq!(parsed.answers().len(), 1);
+        let answer = parsed.answers().first().expect("answer");
+        assert_eq!(answer.name().to_string(), "our.local.");
+    }
+
     #[tokio::test]
     async fn query_answered_emits_event_callback() {
         let table = AnswerTableBuilder::new()
@@ -675,6 +810,7 @@ mod tests {
             Authorization::new(),
             table,
             1,
+            ReplyMode::Multicast,
             None,
         )
         .expect("responder")
@@ -723,6 +859,7 @@ mod tests {
             Authorization::new(),
             table,
             1,
+            ReplyMode::Multicast,
             None,
         )
         .expect("responder")

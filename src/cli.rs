@@ -19,6 +19,7 @@ use crate::output::{
     emit_instance, emit_neighbor_entries, emit_sweep_results,
 };
 use crate::probe::{self, ProbeOptions};
+use crate::spoof::ReplyMode;
 use crate::spoof_template::{self, Template};
 use crate::types::{Protocol, ServiceType};
 
@@ -221,6 +222,10 @@ pub enum Cmd {
         #[arg(long, value_name = "HOST:PORT")]
         relay: Option<SocketAddr>,
 
+        /// Where spoof answers are sent.
+        #[arg(long, value_enum, default_value_t = ReplyMode::Multicast)]
+        reply: ReplyMode,
+
         /// Periodically multicast our spoofed records to push them into client caches.
         /// 0 means only reply to incoming queries (default).
         #[arg(long, value_name = "SECS", default_value_t = 0)]
@@ -404,6 +409,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             allow,
             allow_instance,
             relay,
+            reply,
             reannounce_interval,
         } => {
             run_spoof(
@@ -416,6 +422,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
                 allow,
                 allow_instance,
                 relay,
+                reply,
                 reannounce_interval,
                 scope,
             )
@@ -690,6 +697,7 @@ async fn run_spoof(
     allow: Vec<IpNet>,
     allow_instance: Vec<String>,
     relay: Option<SocketAddr>,
+    reply: ReplyMode,
     reannounce_interval: u64,
     scope: Option<crate::scope::Scope>,
 ) -> anyhow::Result<()> {
@@ -724,7 +732,8 @@ async fn run_spoof(
     } else {
         Some(std::time::Duration::from_secs(reannounce_interval))
     };
-    let resp = crate::spoof::Responder::new(Mode::Authoritative, auth, table, burst, interval)?;
+    let resp =
+        crate::spoof::Responder::new(Mode::Authoritative, auth, table, burst, reply, interval)?;
     let cancel = resp.cancel_token();
     if let Some(target) = relay {
         crate::relay::run(&ports, target, cancel.clone()).await?;
@@ -1147,6 +1156,20 @@ mod tests {
         assert!(name_str.ends_with(".pcap"));
         assert!(name_str.contains('T'));
         assert!(name_str.contains('Z'));
+    }
+
+    #[test]
+    #[allow(
+        clippy::panic,
+        reason = "test assertion intentionally panics on wrong variant"
+    )]
+    fn cli_parses_spoof_reply_mode() {
+        let c = Cli::try_parse_from(["whodis", "spoof", "answers.toml", "--reply", "unicast"])
+            .expect("parse");
+        match c.command {
+            Cmd::Spoof { reply, .. } => assert_eq!(reply, ReplyMode::Unicast),
+            other => panic!("expected Spoof, got {other:?}"),
+        }
     }
 
     #[test]
