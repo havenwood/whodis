@@ -283,6 +283,21 @@ pub struct Responder {
     burst: u8,
     reannounce_interval: Option<Duration>,
     cancel: CancellationToken,
+    event_callback: Option<Arc<dyn Fn(ResponderEvent) + Send + Sync>>,
+}
+
+#[derive(Debug, Clone)]
+pub enum ResponderEvent {
+    QueryAnswered {
+        name: String,
+        qtype: RecordType,
+        src: std::net::SocketAddr,
+    },
+    Conflict {
+        name: String,
+        qtype: RecordType,
+        src: std::net::SocketAddr,
+    },
 }
 
 impl Responder {
@@ -307,7 +322,17 @@ impl Responder {
             burst: burst.max(1),
             reannounce_interval,
             cancel: CancellationToken::new(),
+            event_callback: None,
         })
+    }
+
+    #[must_use]
+    pub fn with_event_callback(
+        mut self,
+        callback: impl Fn(ResponderEvent) + Send + Sync + 'static,
+    ) -> Self {
+        self.event_callback = Some(Arc::new(callback));
+        self
     }
 
     #[must_use]
@@ -393,6 +418,11 @@ impl Responder {
                     }
                 }
                 tracing::info!(query = %name, qtype = ?q.query_type(), %src, "spoofed");
+                self.emit_event(ResponderEvent::QueryAnswered {
+                    name,
+                    qtype: q.query_type(),
+                    src,
+                });
             }
         }
     }
@@ -414,7 +444,14 @@ impl Responder {
                     qtype = ?qtype,
                     "spoof conflict: another responder claims a name we own"
                 );
+                self.emit_event(ResponderEvent::Conflict { name, qtype, src });
             }
+        }
+    }
+
+    fn emit_event(&self, event: ResponderEvent) {
+        if let Some(callback) = &self.event_callback {
+            callback(event);
         }
     }
 }
@@ -476,8 +513,11 @@ async fn recv_one(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use std::net::Ipv4Addr;
 
+    use hickory_proto::op::Query;
     use hickory_proto::rr::rdata::A;
 
     use super::*;
@@ -612,5 +652,105 @@ mod tests {
             t.lookup_response("not-ours.local.", RecordType::A)
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn query_answered_emits_event_callback() {
+        let table = AnswerTableBuilder::new()
+            .answer(
+                "our.local.",
+                RecordType::A,
+                RData::A(A(Ipv4Addr::new(1, 2, 3, 4))),
+            )
+            .expect("answer")
+            .build();
+        let events: Arc<Mutex<Vec<ResponderEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let events_for_callback = Arc::clone(&events);
+        let responder = Responder::new(
+            Mode::Custom {
+                group_v4: Ipv4Addr::new(239, 255, 99, 99),
+                group_v6: std::net::Ipv6Addr::LOCALHOST,
+                port: 15355,
+            },
+            Authorization::new(),
+            table,
+            1,
+            None,
+        )
+        .expect("responder")
+        .with_event_callback(move |event| {
+            events_for_callback.lock().expect("events lock").push(event);
+        });
+
+        let mut msg = Message::new(0, MessageType::Query, OpCode::Query);
+        msg.add_query(Query::query(
+            Name::from_utf8("our.local.").expect("name"),
+            RecordType::A,
+        ));
+
+        let src = std::net::SocketAddr::from((Ipv4Addr::new(10, 0, 0, 2), 5353));
+        responder.handle_query(msg, src).await;
+
+        let query_answered = {
+            let events = events.lock().expect("events lock");
+            matches!(
+                events.first(),
+                Some(ResponderEvent::QueryAnswered { name, qtype, src: event_src })
+                    if name == "our.local." && *qtype == RecordType::A && *event_src == src
+            )
+        };
+        assert!(query_answered);
+    }
+
+    #[tokio::test]
+    async fn response_conflict_emits_event_callback() {
+        let table = AnswerTableBuilder::new()
+            .answer(
+                "our.local.",
+                RecordType::A,
+                RData::A(A(Ipv4Addr::new(1, 2, 3, 4))),
+            )
+            .expect("answer")
+            .build();
+        let events: Arc<Mutex<Vec<ResponderEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let events_for_callback = Arc::clone(&events);
+        let responder = Responder::new(
+            Mode::Custom {
+                group_v4: Ipv4Addr::new(239, 255, 99, 99),
+                group_v6: std::net::Ipv6Addr::LOCALHOST,
+                port: 15354,
+            },
+            Authorization::new(),
+            table,
+            1,
+            None,
+        )
+        .expect("responder")
+        .with_event_callback(move |event| {
+            events_for_callback.lock().expect("events lock").push(event);
+        });
+
+        let mut msg = Message::new(0, MessageType::Query, OpCode::Query);
+        msg.set_message_type(MessageType::Response)
+            .set_authoritative(true)
+            .set_response_code(ResponseCode::NoError);
+        msg.add_answer(Record::from_rdata(
+            Name::from_utf8("our.local.").expect("name"),
+            60,
+            RData::A(A(Ipv4Addr::new(9, 9, 9, 9))),
+        ));
+
+        let src = std::net::SocketAddr::from((Ipv4Addr::new(10, 0, 0, 2), 5353));
+        responder.handle_response(&msg, src);
+
+        let conflict_emitted = {
+            let events = events.lock().expect("events lock");
+            matches!(
+                events.first(),
+                Some(ResponderEvent::Conflict { name, qtype, src: event_src })
+                    if name == "our.local." && *qtype == RecordType::A && *event_src == src
+            )
+        };
+        assert!(conflict_emitted);
     }
 }

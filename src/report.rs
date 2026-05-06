@@ -19,7 +19,7 @@ use crate::types::{Fingerprint, Instance};
 
 const DEFAULT_WINDOW_SECS: u64 = 10;
 
-pub(crate) async fn write(out_path: &Path, window_secs: u64) -> Result<usize> {
+pub async fn write(out_path: &Path, window_secs: u64) -> Result<usize> {
     let secs = if window_secs == 0 {
         DEFAULT_WINDOW_SECS
     } else {

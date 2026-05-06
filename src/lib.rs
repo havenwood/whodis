@@ -6,7 +6,7 @@
 
 pub mod arp;
 mod auth;
-mod capture;
+pub mod capture;
 mod cli;
 pub mod clone;
 pub(crate) mod dns_sd;
@@ -17,7 +17,7 @@ mod name_util;
 pub mod oui;
 mod output;
 pub mod relay;
-mod report;
+pub mod report;
 pub mod scope;
 pub mod spoof_table;
 mod transport;

@@ -6,6 +6,8 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use tokio_util::sync::CancellationToken;
+
 use crate::error::Result;
 use crate::mode::{MDNS_GROUP_V4, MDNS_GROUP_V6, MDNS_PORT, Mode};
 use crate::transport::Transport;
@@ -13,22 +15,34 @@ use crate::transport::Transport;
 const SNAPLEN: u32 = 65535;
 const LINKTYPE_RAW: u32 = 101;
 
-pub(crate) async fn run(path: &Path, timeout: u64) -> Result<usize> {
-    let file = std::fs::File::create(path)?;
-    let mut w = BufWriter::new(file);
-    write_global_header(&mut w)?;
-
-    let transport = Arc::new(Transport::build(Mode::Listen)?);
-    let v4 = transport.v4();
-    let v6 = transport.v6();
-
-    let cancel = tokio_util::sync::CancellationToken::new();
+pub async fn run(path: &Path, timeout: u64) -> Result<usize> {
+    let cancel = CancellationToken::new();
     let cancel_for_signal = cancel.clone();
     tokio::spawn(async move {
         if tokio::signal::ctrl_c().await.is_ok() {
             cancel_for_signal.cancel();
         }
     });
+    run_with_cancel(path, timeout, cancel, |_| {}).await
+}
+
+pub async fn run_with_cancel<F>(
+    path: &Path,
+    timeout: u64,
+    cancel: CancellationToken,
+    on_packet: F,
+) -> Result<usize>
+where
+    F: FnMut(usize),
+{
+    let file = std::fs::File::create(path)?;
+    let mut w = BufWriter::new(file);
+    write_global_header(&mut w)?;
+    w.flush()?;
+
+    let transport = Arc::new(Transport::build(Mode::Listen)?);
+    let v4 = transport.v4();
+    let v6 = transport.v6();
 
     let deadline = if timeout == 0 {
         None
@@ -37,6 +51,7 @@ pub(crate) async fn run(path: &Path, timeout: u64) -> Result<usize> {
     };
 
     let mut count = 0_usize;
+    let mut on_packet = on_packet;
     loop {
         let until_deadline = async {
             match deadline {
@@ -54,7 +69,12 @@ pub(crate) async fn run(path: &Path, timeout: u64) -> Result<usize> {
                             tracing::debug!(error = %e, "pcap write failed; continuing");
                             continue;
                         }
+                        if let Err(e) = w.flush() {
+                            tracing::debug!(error = %e, "pcap flush failed; continuing");
+                            continue;
+                        }
                         count += 1;
+                        on_packet(count);
                     }
                     Ok(None) => {}
                     Err(e) => tracing::debug!(error = %e, "rx error, continuing"),

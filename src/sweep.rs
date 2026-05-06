@@ -98,6 +98,8 @@ async fn probe_one(
         let udp = UdpSocket::from(owned);
         udp.set_nonblocking(false)
             .context("set_nonblocking false")?;
+        udp.set_read_timeout(Some(t))
+            .context("set ICMP read timeout")?;
 
         let pkt = build_echo_packet(id, seq);
         let start = Instant::now();
