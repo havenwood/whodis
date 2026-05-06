@@ -66,6 +66,11 @@ impl Browser {
         self.cancel.clone()
     }
 
+    pub(crate) fn seed_service_type(&self, service_type: ServiceType) {
+        self.known_service_types
+            .insert(service_type.fqdn(), service_type);
+    }
+
     pub fn run(self) -> impl Stream<Item = Event> + Send + 'static {
         let (tx, rx) = mpsc::channel::<Event>(1024);
         let cancel = self.cancel.clone();
