@@ -41,7 +41,7 @@ pub async fn probe_service(
     no_dns_sd: bool,
     extra_apple_services: &[String],
 ) -> Result<Vec<Instance>> {
-    let wire_results = browse_instances(service, None, opts).await?;
+    let wire_results = probe_service_with_mode(service, opts, Mode::Listen).await?;
     if wire_results.is_empty()
         && !no_dns_sd
         && crate::dns_sd::is_apple_service_type(&service.fqdn(), extra_apple_services)
@@ -72,7 +72,15 @@ pub async fn probe_instance(
     service: &ServiceType,
     opts: &ProbeOptions,
 ) -> Result<Vec<Instance>> {
-    browse_instances(service, Some(instance_name), opts).await
+    browse_instances_with_mode(service, Some(instance_name), opts, Mode::Listen).await
+}
+
+pub(crate) async fn probe_service_with_mode(
+    service: &ServiceType,
+    opts: &ProbeOptions,
+    mode: Mode,
+) -> Result<Vec<Instance>> {
+    browse_instances_with_mode(service, None, opts, mode).await
 }
 
 pub async fn probe_host(host: &str, opts: &ProbeOptions) -> Result<Vec<HostAnswer>> {
@@ -86,14 +94,15 @@ pub async fn probe_host(host: &str, opts: &ProbeOptions) -> Result<Vec<HostAnswe
     .await
 }
 
-async fn browse_instances(
+async fn browse_instances_with_mode(
     service: &ServiceType,
     instance_name: Option<&str>,
     opts: &ProbeOptions,
+    mode: Mode,
 ) -> Result<Vec<Instance>> {
     use tokio_stream::StreamExt;
 
-    let browser = crate::browse::Browser::new(Mode::Listen)?;
+    let browser = crate::browse::Browser::new(mode)?;
     browser.seed_service_type(service.clone());
     let cancel = browser.cancel_token();
     let stream = browser.run();

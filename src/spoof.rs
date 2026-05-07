@@ -1,6 +1,6 @@
 //! Authoritative mDNS responder for spoofing answers.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -125,6 +125,14 @@ impl AnswerTableBuilder {
 
         let mut map: HashMap<(String, RecordType), ResponseEntry> =
             HashMap::with_capacity(entries.len());
+        let mut conflict_claims: HashSet<ConflictClaim> = HashSet::with_capacity(entries.len());
+        for e in &entries {
+            for record in &e.records {
+                if let Some(claim) = conflict_claim_for_record(record) {
+                    conflict_claims.insert(claim);
+                }
+            }
+        }
         for e in &entries {
             let mut msg = Message::new(0, MessageType::Query, OpCode::Query);
             msg.set_message_type(MessageType::Response)
@@ -158,7 +166,11 @@ impl AnswerTableBuilder {
         srv_ports.sort_unstable();
         srv_ports.dedup();
 
-        AnswerTable { map, srv_ports }
+        AnswerTable {
+            map,
+            srv_ports,
+            conflict_claims,
+        }
     }
 }
 
@@ -243,6 +255,7 @@ fn push_records(
 pub struct AnswerTable {
     map: HashMap<(String, RecordType), ResponseEntry>,
     srv_ports: Vec<u16>,
+    conflict_claims: HashSet<ConflictClaim>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -290,6 +303,79 @@ impl AnswerTable {
     #[must_use]
     pub fn srv_ports(&self) -> &[u16] {
         &self.srv_ports
+    }
+
+    #[must_use]
+    pub(crate) fn conflicts_with(&self, record: &Record) -> bool {
+        let Some(claim) = conflict_claim_for_record(record) else {
+            return false;
+        };
+        match &claim {
+            ConflictClaim::Address { owner, qtype, data } => {
+                let mut owns_name_type = false;
+                for owned in &self.conflict_claims {
+                    if let ConflictClaim::Address {
+                        owner: owned_owner,
+                        qtype: owned_qtype,
+                        data: owned_data,
+                    } = owned
+                        && owned_owner == owner
+                        && owned_qtype == qtype
+                    {
+                        owns_name_type = true;
+                        if owned_data == data {
+                            return false;
+                        }
+                    }
+                }
+                owns_name_type
+            }
+            ConflictClaim::Ptr { .. } | ConflictClaim::OwnerType { .. } => {
+                self.conflict_claims.contains(&claim)
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum ConflictClaim {
+    Ptr {
+        owner: String,
+        target: String,
+    },
+    OwnerType {
+        owner: String,
+        qtype: RecordType,
+    },
+    Address {
+        owner: String,
+        qtype: RecordType,
+        data: String,
+    },
+}
+
+fn conflict_claim_for_record(record: &Record) -> Option<ConflictClaim> {
+    let owner = normalize(&record.name().to_string());
+    match record.data() {
+        Some(RData::PTR(ptr)) => Some(ConflictClaim::Ptr {
+            owner,
+            target: normalize(&ptr.0.to_string()),
+        }),
+        Some(RData::SRV(_) | RData::TXT(_)) => Some(ConflictClaim::OwnerType {
+            owner,
+            qtype: record.record_type(),
+        }),
+        Some(RData::A(addr)) => Some(ConflictClaim::Address {
+            owner,
+            qtype: record.record_type(),
+            data: addr.0.to_string(),
+        }),
+        Some(RData::AAAA(addr)) => Some(ConflictClaim::Address {
+            owner,
+            qtype: record.record_type(),
+            data: addr.0.to_string(),
+        }),
+        _ => None,
     }
 }
 
@@ -468,10 +554,7 @@ impl Responder {
         for r in msg.answers() {
             let name = r.name().to_string();
             let qtype = r.record_type();
-            if qtype == RecordType::PTR {
-                continue;
-            }
-            if self.table.lookup_response(&name, qtype).is_some() {
+            if self.table.conflicts_with(r) {
                 tracing::warn!(
                     %src,
                     name = %name,
@@ -944,5 +1027,142 @@ mod tests {
             events.lock().expect("events lock").is_empty(),
             "shared service-type PTR records should not be treated as conflicts"
         );
+    }
+
+    #[tokio::test]
+    async fn matching_ptr_target_emits_conflict() {
+        let table = AnswerTableBuilder::new()
+            .answer(
+                "_ssh._tcp.local.",
+                RecordType::PTR,
+                RData::PTR(hickory_proto::rr::rdata::PTR(
+                    Name::from_utf8("our._ssh._tcp.local.").expect("our instance"),
+                )),
+            )
+            .expect("answer")
+            .build();
+        let events: Arc<Mutex<Vec<ResponderEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let events_for_callback = Arc::clone(&events);
+        let responder = Responder::new(
+            Mode::Custom {
+                group_v4: Ipv4Addr::new(239, 255, 99, 99),
+                group_v6: std::net::Ipv6Addr::LOCALHOST,
+                port: 15354,
+            },
+            Authorization::new(),
+            table,
+            1,
+            ReplyMode::Multicast,
+            None,
+        )
+        .expect("responder")
+        .with_event_callback(move |event| {
+            events_for_callback.lock().expect("events lock").push(event);
+        });
+
+        let mut msg = Message::new(0, MessageType::Query, OpCode::Query);
+        msg.set_message_type(MessageType::Response)
+            .set_authoritative(true)
+            .set_response_code(ResponseCode::NoError);
+        msg.add_answer(Record::from_rdata(
+            Name::from_utf8("_ssh._tcp.local.").expect("service type"),
+            60,
+            RData::PTR(hickory_proto::rr::rdata::PTR(
+                Name::from_utf8("our._ssh._tcp.local.").expect("our instance"),
+            )),
+        ));
+
+        let src = std::net::SocketAddr::from((Ipv4Addr::new(10, 0, 0, 2), 5353));
+        responder.handle_response(&msg, src);
+
+        let conflict_emitted = {
+            let events = events.lock().expect("events lock");
+            matches!(
+                events.first(),
+                Some(ResponderEvent::Conflict { name, qtype, src: event_src })
+                    if name == "_ssh._tcp.local." && *qtype == RecordType::PTR && *event_src == src
+            )
+        };
+        assert!(conflict_emitted);
+    }
+
+    #[tokio::test]
+    async fn same_address_response_does_not_emit_conflict() {
+        let table = AnswerTableBuilder::new()
+            .answer(
+                "our.local.",
+                RecordType::A,
+                RData::A(A(Ipv4Addr::new(1, 2, 3, 4))),
+            )
+            .expect("answer")
+            .build();
+        let events: Arc<Mutex<Vec<ResponderEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let events_for_callback = Arc::clone(&events);
+        let responder = Responder::new(
+            Mode::Custom {
+                group_v4: Ipv4Addr::new(239, 255, 99, 99),
+                group_v6: std::net::Ipv6Addr::LOCALHOST,
+                port: 15354,
+            },
+            Authorization::new(),
+            table,
+            1,
+            ReplyMode::Multicast,
+            None,
+        )
+        .expect("responder")
+        .with_event_callback(move |event| {
+            events_for_callback.lock().expect("events lock").push(event);
+        });
+
+        let mut msg = Message::new(0, MessageType::Query, OpCode::Query);
+        msg.set_message_type(MessageType::Response)
+            .set_authoritative(true)
+            .set_response_code(ResponseCode::NoError);
+        msg.add_answer(Record::from_rdata(
+            Name::from_utf8("our.local.").expect("name"),
+            60,
+            RData::A(A(Ipv4Addr::new(1, 2, 3, 4))),
+        ));
+
+        let src = std::net::SocketAddr::from((Ipv4Addr::new(10, 0, 0, 2), 5353));
+        responder.handle_response(&msg, src);
+
+        assert!(
+            events.lock().expect("events lock").is_empty(),
+            "same-address duplicate A response should not be treated as a conflict"
+        );
+    }
+
+    #[test]
+    fn multi_address_owner_conflicts_only_on_unknown_address() {
+        let table = AnswerTableBuilder::new()
+            .answer(
+                "our.local.",
+                RecordType::A,
+                RData::A(A(Ipv4Addr::new(1, 2, 3, 4))),
+            )
+            .expect("first answer")
+            .answer(
+                "our.local.",
+                RecordType::A,
+                RData::A(A(Ipv4Addr::new(1, 2, 3, 5))),
+            )
+            .expect("second answer")
+            .build();
+
+        let known = Record::from_rdata(
+            Name::from_utf8("our.local.").expect("name"),
+            60,
+            RData::A(A(Ipv4Addr::new(1, 2, 3, 4))),
+        );
+        let unknown = Record::from_rdata(
+            Name::from_utf8("our.local.").expect("name"),
+            60,
+            RData::A(A(Ipv4Addr::new(1, 2, 3, 6))),
+        );
+
+        assert!(!table.conflicts_with(&known));
+        assert!(table.conflicts_with(&unknown));
     }
 }

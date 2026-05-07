@@ -688,7 +688,7 @@ async fn run_probe(
     reason = "all args map 1:1 to CLI flags; splitting into a struct would obscure the relationship"
 )]
 async fn run_spoof(
-    _renderer: Renderer,
+    renderer: Renderer,
     table_path: Option<std::path::PathBuf>,
     template: Option<Template>,
     name: Option<String>,
@@ -701,6 +701,14 @@ async fn run_spoof(
     reannounce_interval: u64,
     scope: Option<crate::scope::Scope>,
 ) -> anyhow::Result<()> {
+    if template.is_none()
+        && table_path
+            .as_deref()
+            .is_some_and(|path| path == std::path::Path::new("verify"))
+    {
+        return crate::spoof_verify::run(renderer).await;
+    }
+
     let table = if let Some(tmpl) = template {
         if table_path.is_some() {
             tracing::warn!("--template and TABLE both given; --template takes precedence");
@@ -1168,6 +1176,24 @@ mod tests {
             .expect("parse");
         match c.command {
             Cmd::Spoof { reply, .. } => assert_eq!(reply, ReplyMode::Unicast),
+            other => panic!("expected Spoof, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[allow(
+        clippy::panic,
+        reason = "test assertion intentionally panics on wrong variant"
+    )]
+    fn cli_parses_spoof_verify_marker() {
+        let c = Cli::try_parse_from(["whodis", "spoof", "verify"]).expect("parse");
+        match c.command {
+            Cmd::Spoof {
+                table, template, ..
+            } => {
+                assert_eq!(table.as_deref(), Some(std::path::Path::new("verify")));
+                assert!(template.is_none());
+            }
             other => panic!("expected Spoof, got {other:?}"),
         }
     }

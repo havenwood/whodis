@@ -20,6 +20,7 @@ pub mod relay;
 pub mod report;
 pub mod scope;
 pub mod spoof_table;
+pub mod spoof_verify;
 mod transport;
 mod types;
 
@@ -36,6 +37,7 @@ pub use auth::Authorization;
 pub use cli::{Cli, Cmd, FloodCmd, run};
 pub use error::{Error, Result};
 pub use mode::{MDNS_GROUP_V4, MDNS_GROUP_V6, MDNS_PORT, Mode};
+pub use spoof_verify::{SpoofVerifyOptions, SpoofVerifyResult, spoof_verify};
 pub use sweep::{SweepOptions, SweepProbe};
 pub use types::{
     Device, Fingerprint, HostAnswer, Instance, NeighborEntry, Protocol, ServiceType, SweepResult,

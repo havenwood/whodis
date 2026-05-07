@@ -27,6 +27,9 @@ pub enum Error {
         target: String,
         timeout: std::time::Duration,
     },
+
+    #[error("spoof verify failed: {reason}")]
+    SpoofVerify { reason: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
