@@ -468,6 +468,9 @@ impl Responder {
         for r in msg.answers() {
             let name = r.name().to_string();
             let qtype = r.record_type();
+            if qtype == RecordType::PTR {
+                continue;
+            }
             if self.table.lookup_response(&name, qtype).is_some() {
                 tracing::warn!(
                     %src,
@@ -889,5 +892,57 @@ mod tests {
             )
         };
         assert!(conflict_emitted);
+    }
+
+    #[tokio::test]
+    async fn shared_ptr_response_does_not_emit_conflict() {
+        let table = AnswerTableBuilder::new()
+            .answer(
+                "_ssh._tcp.local.",
+                RecordType::PTR,
+                RData::PTR(hickory_proto::rr::rdata::PTR(
+                    Name::from_utf8("our._ssh._tcp.local.").expect("our instance"),
+                )),
+            )
+            .expect("answer")
+            .build();
+        let events: Arc<Mutex<Vec<ResponderEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let events_for_callback = Arc::clone(&events);
+        let responder = Responder::new(
+            Mode::Custom {
+                group_v4: Ipv4Addr::new(239, 255, 99, 99),
+                group_v6: std::net::Ipv6Addr::LOCALHOST,
+                port: 15354,
+            },
+            Authorization::new(),
+            table,
+            1,
+            ReplyMode::Multicast,
+            None,
+        )
+        .expect("responder")
+        .with_event_callback(move |event| {
+            events_for_callback.lock().expect("events lock").push(event);
+        });
+
+        let mut msg = Message::new(0, MessageType::Query, OpCode::Query);
+        msg.set_message_type(MessageType::Response)
+            .set_authoritative(true)
+            .set_response_code(ResponseCode::NoError);
+        msg.add_answer(Record::from_rdata(
+            Name::from_utf8("_ssh._tcp.local.").expect("service type"),
+            60,
+            RData::PTR(hickory_proto::rr::rdata::PTR(
+                Name::from_utf8("other._ssh._tcp.local.").expect("other instance"),
+            )),
+        ));
+
+        let src = std::net::SocketAddr::from((Ipv4Addr::new(10, 0, 0, 2), 5353));
+        responder.handle_response(&msg, src);
+
+        assert!(
+            events.lock().expect("events lock").is_empty(),
+            "shared service-type PTR records should not be treated as conflicts"
+        );
     }
 }
