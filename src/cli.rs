@@ -7,6 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::Context;
 use clap::{CommandFactory, Parser, Subcommand};
 use ipnet::IpNet;
+use serde::Serialize;
 use tokio_stream::StreamExt;
 
 use crate::auth::Authorization;
@@ -19,7 +20,7 @@ use crate::output::{
     emit_instance, emit_neighbor_entries, emit_sweep_results,
 };
 use crate::probe::{self, ProbeOptions};
-use crate::spoof::ReplyMode;
+use crate::spoof::{MonitorBlockReason, MonitorEvent, ReplyMode};
 use crate::spoof_template::{self, Template};
 use crate::types::{Protocol, ServiceType};
 
@@ -230,6 +231,14 @@ pub enum Cmd {
         /// 0 means only reply to incoming queries (default).
         #[arg(long, value_name = "SECS", default_value_t = 0)]
         reannounce_interval: u64,
+
+        /// Passive dry-run: report matching queries and conflicts without answering.
+        #[arg(long)]
+        monitor: bool,
+
+        /// Monitor window in seconds. 0 = until Ctrl-C.
+        #[arg(short = 't', long, default_value_t = 0)]
+        timeout: u64,
     },
 
     /// Capture a real LAN instance and emit a TOML answer table mimicking it.
@@ -411,6 +420,8 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             relay,
             reply,
             reannounce_interval,
+            monitor,
+            timeout,
         } => {
             run_spoof(
                 renderer,
@@ -424,6 +435,8 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
                 relay,
                 reply,
                 reannounce_interval,
+                monitor,
+                timeout,
                 scope,
             )
             .await?;
@@ -689,7 +702,7 @@ async fn run_probe(
 )]
 async fn run_spoof(
     renderer: Renderer,
-    table_path: Option<std::path::PathBuf>,
+    mut table_path: Option<std::path::PathBuf>,
     template: Option<Template>,
     name: Option<String>,
     ip: Option<Ipv4Addr>,
@@ -699,6 +712,8 @@ async fn run_spoof(
     relay: Option<SocketAddr>,
     reply: ReplyMode,
     reannounce_interval: u64,
+    mut monitor: bool,
+    timeout: u64,
     scope: Option<crate::scope::Scope>,
 ) -> anyhow::Result<()> {
     if template.is_none()
@@ -707,6 +722,13 @@ async fn run_spoof(
             .is_some_and(|path| path == std::path::Path::new("verify"))
     {
         return crate::spoof_verify::run(renderer).await;
+    }
+    if table_path
+        .as_deref()
+        .is_some_and(|path| path == std::path::Path::new("monitor"))
+    {
+        monitor = true;
+        table_path = None;
     }
 
     let table = if let Some(tmpl) = template {
@@ -734,6 +756,9 @@ async fn run_spoof(
         }
         a
     };
+    if monitor {
+        return run_spoof_monitor(renderer, table, auth, timeout).await;
+    }
     let ports = table.srv_ports().to_vec();
     let interval = if reannounce_interval == 0 {
         None
@@ -753,6 +778,131 @@ async fn run_spoof(
         tracing::debug!(error = %e, "spoof task ended");
     }
     Ok(())
+}
+
+async fn run_spoof_monitor(
+    renderer: Renderer,
+    table: crate::spoof::AnswerTable,
+    auth: Authorization,
+    timeout: u64,
+) -> anyhow::Result<()> {
+    let monitor =
+        crate::spoof::Monitor::new(Mode::Listen, auth, table)?.with_event_callback(move |event| {
+            if let Err(e) = emit_monitor_event(renderer, &event) {
+                tracing::error!(error = %e, "emit failed");
+            }
+        });
+    let cancel = monitor.cancel_token();
+    let task = tokio::spawn(async move { monitor.run().await });
+    if timeout > 0 {
+        tokio::time::sleep(Duration::from_secs(timeout)).await;
+    } else {
+        tokio::signal::ctrl_c().await.ok();
+    }
+    cancel.cancel();
+    task.await
+        .map_err(|e| anyhow::anyhow!("spoof monitor task failed: {e}"))??;
+    Ok(())
+}
+
+fn emit_monitor_event(renderer: Renderer, event: &MonitorEvent) -> std::io::Result<()> {
+    let record = MonitorRecord::from(event);
+    match renderer {
+        Renderer::Jsonl => crate::output::emit_jsonl(&record),
+        Renderer::Pretty(color) => emit_monitor_pretty(color, &record),
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct MonitorRecord {
+    kind: &'static str,
+    src: String,
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    qtype: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'static str>,
+}
+
+impl From<&MonitorEvent> for MonitorRecord {
+    fn from(event: &MonitorEvent) -> Self {
+        match event {
+            MonitorEvent::WouldAnswer { name, qtype, src } => Self {
+                kind: "would_answer",
+                src: src.to_string(),
+                name: name.clone(),
+                qtype: Some(format!("{qtype:?}")),
+                target: None,
+                reason: None,
+            },
+            MonitorEvent::Blocked {
+                name,
+                qtype,
+                src,
+                reason,
+            } => Self {
+                kind: "blocked",
+                src: src.to_string(),
+                name: name.clone(),
+                qtype: Some(format!("{qtype:?}")),
+                target: None,
+                reason: Some(match reason {
+                    MonitorBlockReason::SourceAddress => "source_address",
+                    MonitorBlockReason::Instance => "instance",
+                }),
+            },
+            MonitorEvent::Conflict { name, qtype, src } => Self {
+                kind: "conflict",
+                src: src.to_string(),
+                name: name.clone(),
+                qtype: Some(format!("{qtype:?}")),
+                target: None,
+                reason: None,
+            },
+            MonitorEvent::SharedPtr { name, target, src } => Self {
+                kind: "shared_ptr",
+                src: src.to_string(),
+                name: name.clone(),
+                qtype: Some("PTR".to_string()),
+                target: Some(target.clone()),
+                reason: None,
+            },
+        }
+    }
+}
+
+fn emit_monitor_pretty(color: ColorMode, record: &MonitorRecord) -> std::io::Result<()> {
+    let on = color.enabled();
+    let kind = match record.kind {
+        "would_answer" => paint_monitor(on, "would answer", "\x1b[32m"),
+        "blocked" => paint_monitor(on, "blocked", "\x1b[33m"),
+        "conflict" => paint_monitor(on, "conflict", "\x1b[31m"),
+        "shared_ptr" => paint_monitor(on, "shared ptr", "\x1b[34m"),
+        other => other.to_string(),
+    };
+    let qtype = record.qtype.as_deref().unwrap_or("-");
+    let detail = record.target.as_ref().map_or_else(
+        || {
+            record
+                .reason
+                .map_or_else(String::new, |reason| format!(" ({reason})"))
+        },
+        |target| format!(" -> {target}"),
+    );
+    crate::output::emit_raw(&format!(
+        "{kind:<16} {:<5} {}  src={}{}\n",
+        qtype, record.name, record.src, detail
+    ))
+}
+
+fn paint_monitor(enabled: bool, body: &str, color: &str) -> String {
+    if enabled {
+        format!("{color}{body}\x1b[0m")
+    } else {
+        body.to_string()
+    }
 }
 
 #[allow(
@@ -1193,6 +1343,60 @@ mod tests {
             } => {
                 assert_eq!(table.as_deref(), Some(std::path::Path::new("verify")));
                 assert!(template.is_none());
+            }
+            other => panic!("expected Spoof, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[allow(
+        clippy::panic,
+        reason = "test assertion intentionally panics on wrong variant"
+    )]
+    fn cli_parses_spoof_monitor_marker_with_template() {
+        let c = Cli::try_parse_from([
+            "whodis",
+            "spoof",
+            "monitor",
+            "--template",
+            "ssh",
+            "--name",
+            "Demo",
+            "--ip",
+            "127.0.0.1",
+            "--timeout",
+            "5",
+        ])
+        .expect("parse");
+        match c.command {
+            Cmd::Spoof {
+                table,
+                template,
+                monitor,
+                timeout,
+                ..
+            } => {
+                assert_eq!(table.as_deref(), Some(std::path::Path::new("monitor")));
+                assert_eq!(template, Some(Template::Ssh));
+                assert!(!monitor);
+                assert_eq!(timeout, 5);
+            }
+            other => panic!("expected Spoof, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[allow(
+        clippy::panic,
+        reason = "test assertion intentionally panics on wrong variant"
+    )]
+    fn cli_parses_spoof_monitor_flag_with_table() {
+        let c =
+            Cli::try_parse_from(["whodis", "spoof", "--monitor", "answers.toml"]).expect("parse");
+        match c.command {
+            Cmd::Spoof { table, monitor, .. } => {
+                assert_eq!(table.as_deref(), Some(std::path::Path::new("answers.toml")));
+                assert!(monitor);
             }
             other => panic!("expected Spoof, got {other:?}"),
         }

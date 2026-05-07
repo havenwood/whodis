@@ -166,6 +166,17 @@ impl Transport {
             (None, None) => Err(std::io::Error::other("no socket")),
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn test() -> Self {
+        Self {
+            mode: Mode::Listen,
+            v4: None,
+            v6: None,
+            v4_ifaces: vec![Ipv4Addr::new(192, 0, 2, 1)],
+            v6_ifaces: Vec::new(),
+        }
+    }
 }
 
 fn list_interfaces() -> Result<(Vec<Ipv4Addr>, Vec<u32>)> {

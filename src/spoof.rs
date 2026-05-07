@@ -153,6 +153,34 @@ impl AnswerTableBuilder {
             }
         }
 
+        let mut any_entries: HashMap<String, Vec<&AnswerEntry>> =
+            HashMap::with_capacity(entries.len());
+        for e in &entries {
+            any_entries.entry(normalize(&e.name)).or_default().push(e);
+        }
+        let mut any_map: HashMap<String, ResponseEntry> = HashMap::with_capacity(any_entries.len());
+        for (owner, owner_entries) in any_entries {
+            let mut msg = Message::new(0, MessageType::Query, OpCode::Query);
+            msg.set_message_type(MessageType::Response)
+                .set_authoritative(true)
+                .set_response_code(ResponseCode::NoError);
+            let mut auth_names = Vec::new();
+            for e in owner_entries {
+                for r in &e.records {
+                    let mut owned = r.clone();
+                    owned.set_mdns_cache_flush(true);
+                    msg.add_answer(owned);
+                }
+                attach_additionals(&mut msg, &e.records, e.qtype, &by_key);
+                auth_names.extend(auth_names_for_entry(e, &srv_target_to_instances));
+            }
+            auth_names.sort_by_key(|name| normalize(name));
+            auth_names.dedup_by(|a, b| normalize(a) == normalize(b));
+            if let Ok(bytes) = msg.to_bytes() {
+                any_map.insert(owner, ResponseEntry { bytes, auth_names });
+            }
+        }
+
         let mut srv_ports: Vec<u16> = Vec::with_capacity(entries.len());
         for e in &entries {
             if e.qtype == RecordType::SRV {
@@ -168,6 +196,7 @@ impl AnswerTableBuilder {
 
         AnswerTable {
             map,
+            any_map,
             srv_ports,
             conflict_claims,
         }
@@ -254,6 +283,7 @@ fn push_records(
 #[derive(Debug, Clone, Default)]
 pub struct AnswerTable {
     map: HashMap<(String, RecordType), ResponseEntry>,
+    any_map: HashMap<String, ResponseEntry>,
     srv_ports: Vec<u16>,
     conflict_claims: HashSet<ConflictClaim>,
 }
@@ -287,6 +317,9 @@ impl AnswerTable {
 
     #[must_use]
     pub(crate) fn lookup_response(&self, name: &str, qtype: RecordType) -> Option<&ResponseEntry> {
+        if qtype == RecordType::ANY {
+            return self.any_map.get(&normalize(name));
+        }
         self.map.get(&(normalize(name), qtype))
     }
 
@@ -406,6 +439,182 @@ pub enum ResponderEvent {
         qtype: RecordType,
         src: std::net::SocketAddr,
     },
+}
+
+pub struct Monitor {
+    transport: Arc<Transport>,
+    auth: Authorization,
+    table: Arc<AnswerTable>,
+    cancel: CancellationToken,
+    event_callback: Option<Arc<dyn Fn(MonitorEvent) + Send + Sync>>,
+}
+
+#[derive(Debug, Clone)]
+pub enum MonitorEvent {
+    WouldAnswer {
+        name: String,
+        qtype: RecordType,
+        src: std::net::SocketAddr,
+    },
+    Blocked {
+        name: String,
+        qtype: RecordType,
+        src: std::net::SocketAddr,
+        reason: MonitorBlockReason,
+    },
+    Conflict {
+        name: String,
+        qtype: RecordType,
+        src: std::net::SocketAddr,
+    },
+    SharedPtr {
+        name: String,
+        target: String,
+        src: std::net::SocketAddr,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MonitorBlockReason {
+    SourceAddress,
+    Instance,
+}
+
+impl Monitor {
+    pub fn new(mode: Mode, auth: Authorization, table: AnswerTable) -> Result<Self> {
+        if !mode.binds_port() {
+            return Err(Error::InvalidServiceType(format!(
+                "Monitor requires Listen, Authoritative, or Custom mode, got {mode:?}"
+            )));
+        }
+        let transport = Arc::new(Transport::build(mode)?);
+        Ok(Self {
+            transport,
+            auth,
+            table: Arc::new(table),
+            cancel: CancellationToken::new(),
+            event_callback: None,
+        })
+    }
+
+    #[must_use]
+    pub fn with_event_callback(
+        mut self,
+        callback: impl Fn(MonitorEvent) + Send + Sync + 'static,
+    ) -> Self {
+        self.event_callback = Some(Arc::new(callback));
+        self
+    }
+
+    #[must_use]
+    pub fn cancel_token(&self) -> CancellationToken {
+        self.cancel.clone()
+    }
+
+    pub async fn run(self) -> Result<()> {
+        let v4 = self.transport.v4();
+        let v6 = self.transport.v6();
+        let mut buf = vec![0u8; 9000];
+        loop {
+            tokio::select! {
+                () = self.cancel.cancelled() => return Ok(()),
+                r = recv_one(v4.as_ref(), v6.as_ref(), &mut buf) => {
+                    match r {
+                        Ok(Some((n, src))) => {
+                            let payload = buf.get(..n).unwrap_or(&[]);
+                            self.handle_packet(payload, src);
+                        }
+                        Ok(None) => {}
+                        Err(e) => tracing::debug!(error = %e, "spoof monitor rx error, continuing"),
+                    }
+                }
+            }
+        }
+    }
+
+    fn handle_packet(&self, payload: &[u8], src: std::net::SocketAddr) {
+        let Ok(msg) = Message::from_bytes(payload) else {
+            return;
+        };
+        match msg.message_type() {
+            MessageType::Query => self.handle_query(&msg, src),
+            MessageType::Response => self.handle_response(&msg, src),
+        }
+    }
+
+    fn handle_query(&self, msg: &Message, src: std::net::SocketAddr) {
+        for q in msg.queries() {
+            let name = q.name().to_string();
+            let qtype = q.query_type();
+            let Some(response) = self.table.lookup_response(&name, qtype) else {
+                continue;
+            };
+            if !self.auth.permits_addr(src.ip()) {
+                self.emit_event(MonitorEvent::Blocked {
+                    name,
+                    qtype,
+                    src,
+                    reason: MonitorBlockReason::SourceAddress,
+                });
+                continue;
+            }
+            if !response
+                .auth_names
+                .iter()
+                .any(|candidate| self.auth.permits_instance(candidate))
+            {
+                self.emit_event(MonitorEvent::Blocked {
+                    name,
+                    qtype,
+                    src,
+                    reason: MonitorBlockReason::Instance,
+                });
+                continue;
+            }
+            self.emit_event(MonitorEvent::WouldAnswer { name, qtype, src });
+        }
+    }
+
+    fn handle_response(&self, msg: &Message, src: std::net::SocketAddr) {
+        if src.port() != self.transport.mode.port()
+            || self.transport.is_local_addr(src.ip())
+            || msg.answers().is_empty()
+        {
+            return;
+        }
+        for r in msg.answers() {
+            let name = r.name().to_string();
+            let qtype = r.record_type();
+            if self.table.conflicts_with(r) {
+                self.emit_event(MonitorEvent::Conflict { name, qtype, src });
+            } else if let Some(RData::PTR(ptr)) = r.data()
+                && self.table.lookup_response(&name, RecordType::PTR).is_some()
+            {
+                self.emit_event(MonitorEvent::SharedPtr {
+                    name,
+                    target: ptr.0.to_string(),
+                    src,
+                });
+            }
+        }
+    }
+
+    fn emit_event(&self, event: MonitorEvent) {
+        if let Some(callback) = &self.event_callback {
+            callback(event);
+        }
+    }
+
+    #[cfg(test)]
+    fn test(auth: Authorization, table: AnswerTable) -> Self {
+        Self {
+            transport: Arc::new(Transport::test()),
+            auth,
+            table: Arc::new(table),
+            cancel: CancellationToken::new(),
+            event_callback: None,
+        }
+    }
 }
 
 impl Responder {
@@ -545,7 +754,7 @@ impl Responder {
     }
 
     fn handle_response(&self, msg: &Message, src: std::net::SocketAddr) {
-        if self.transport.is_local_addr(src.ip()) {
+        if src.port() != self.transport.mode.port() || self.transport.is_local_addr(src.ip()) {
             return;
         }
         if msg.answers().is_empty() {
@@ -780,6 +989,39 @@ mod tests {
     }
 
     #[test]
+    fn any_lookup_returns_all_owned_name_records() {
+        let instance = "Demo._ssh._tcp.local.";
+        let table = AnswerTableBuilder::new()
+            .answer(
+                instance,
+                RecordType::SRV,
+                RData::SRV(hickory_proto::rr::rdata::SRV::new(
+                    0,
+                    0,
+                    22,
+                    Name::from_utf8("demo.local.").expect("host"),
+                )),
+            )
+            .expect("srv")
+            .answer(
+                instance,
+                RecordType::TXT,
+                RData::TXT(hickory_proto::rr::rdata::TXT::new(vec![
+                    "txtvers=1".to_string(),
+                ])),
+            )
+            .expect("txt")
+            .build();
+
+        let bytes = table.lookup(instance, RecordType::ANY).expect("any lookup");
+        let msg = Message::from_bytes(bytes).expect("parse any response");
+        let answer_types: HashSet<_> = msg.answers().iter().map(Record::record_type).collect();
+
+        assert!(answer_types.contains(&RecordType::SRV));
+        assert!(answer_types.contains(&RecordType::TXT));
+    }
+
+    #[test]
     fn response_destination_auto_follows_query_unicast_bit() {
         let src = std::net::SocketAddr::from((Ipv4Addr::new(10, 0, 0, 2), 5353));
         let mut query = Query::query(Name::from_utf8("our.local.").expect("name"), RecordType::A);
@@ -963,7 +1205,7 @@ mod tests {
             RData::A(A(Ipv4Addr::new(9, 9, 9, 9))),
         ));
 
-        let src = std::net::SocketAddr::from((Ipv4Addr::new(10, 0, 0, 2), 5353));
+        let src = std::net::SocketAddr::from((Ipv4Addr::new(10, 0, 0, 2), 15354));
         responder.handle_response(&msg, src);
 
         let conflict_emitted = {
@@ -975,6 +1217,51 @@ mod tests {
             )
         };
         assert!(conflict_emitted);
+    }
+
+    #[tokio::test]
+    async fn response_conflict_ignores_wrong_source_port() {
+        let table = AnswerTableBuilder::new()
+            .answer(
+                "our.local.",
+                RecordType::A,
+                RData::A(A(Ipv4Addr::new(1, 2, 3, 4))),
+            )
+            .expect("answer")
+            .build();
+        let events: Arc<Mutex<Vec<ResponderEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let events_for_callback = Arc::clone(&events);
+        let responder = Responder::new(
+            Mode::Custom {
+                group_v4: Ipv4Addr::new(239, 255, 99, 99),
+                group_v6: std::net::Ipv6Addr::LOCALHOST,
+                port: 15354,
+            },
+            Authorization::new(),
+            table,
+            1,
+            ReplyMode::Multicast,
+            None,
+        )
+        .expect("responder")
+        .with_event_callback(move |event| {
+            events_for_callback.lock().expect("events lock").push(event);
+        });
+
+        let mut msg = Message::new(0, MessageType::Query, OpCode::Query);
+        msg.set_message_type(MessageType::Response)
+            .set_authoritative(true)
+            .set_response_code(ResponseCode::NoError);
+        msg.add_answer(Record::from_rdata(
+            Name::from_utf8("our.local.").expect("name"),
+            60,
+            RData::A(A(Ipv4Addr::new(9, 9, 9, 9))),
+        ));
+
+        let src = std::net::SocketAddr::from((Ipv4Addr::new(10, 0, 0, 2), 5353));
+        responder.handle_response(&msg, src);
+
+        assert!(events.lock().expect("events lock").is_empty());
     }
 
     #[tokio::test]
@@ -1020,7 +1307,7 @@ mod tests {
             )),
         ));
 
-        let src = std::net::SocketAddr::from((Ipv4Addr::new(10, 0, 0, 2), 5353));
+        let src = std::net::SocketAddr::from((Ipv4Addr::new(10, 0, 0, 2), 15354));
         responder.handle_response(&msg, src);
 
         assert!(
@@ -1072,7 +1359,7 @@ mod tests {
             )),
         ));
 
-        let src = std::net::SocketAddr::from((Ipv4Addr::new(10, 0, 0, 2), 5353));
+        let src = std::net::SocketAddr::from((Ipv4Addr::new(10, 0, 0, 2), 15354));
         responder.handle_response(&msg, src);
 
         let conflict_emitted = {
@@ -1125,7 +1412,7 @@ mod tests {
             RData::A(A(Ipv4Addr::new(1, 2, 3, 4))),
         ));
 
-        let src = std::net::SocketAddr::from((Ipv4Addr::new(10, 0, 0, 2), 5353));
+        let src = std::net::SocketAddr::from((Ipv4Addr::new(10, 0, 0, 2), 15354));
         responder.handle_response(&msg, src);
 
         assert!(
@@ -1164,5 +1451,186 @@ mod tests {
 
         assert!(!table.conflicts_with(&known));
         assert!(table.conflicts_with(&unknown));
+    }
+
+    fn ssh_ptr_table() -> AnswerTable {
+        AnswerTableBuilder::new()
+            .answer(
+                "_ssh._tcp.local.",
+                RecordType::PTR,
+                RData::PTR(hickory_proto::rr::rdata::PTR(
+                    Name::from_utf8("Demo._ssh._tcp.local.").expect("instance"),
+                )),
+            )
+            .expect("answer")
+            .build()
+    }
+
+    fn monitor_with_events(
+        auth: Authorization,
+        table: AnswerTable,
+    ) -> (Monitor, Arc<Mutex<Vec<MonitorEvent>>>) {
+        let events: Arc<Mutex<Vec<MonitorEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let events_for_callback = Arc::clone(&events);
+        let monitor = Monitor::test(auth, table).with_event_callback(move |event| {
+            events_for_callback.lock().expect("events lock").push(event);
+        });
+        (monitor, events)
+    }
+
+    fn query_packet(name: &str, qtype: RecordType) -> Vec<u8> {
+        let mut msg = Message::new(0x1234, MessageType::Query, OpCode::Query);
+        msg.add_query(Query::query(
+            Name::from_utf8(name).expect("query name"),
+            qtype,
+        ));
+        msg.to_bytes().expect("query bytes")
+    }
+
+    fn ptr_query_packet(name: &str) -> Vec<u8> {
+        query_packet(name, RecordType::PTR)
+    }
+
+    fn first_monitor_event(events: &Arc<Mutex<Vec<MonitorEvent>>>) -> Option<MonitorEvent> {
+        events.lock().expect("events lock").first().cloned()
+    }
+
+    #[test]
+    fn monitor_query_emits_would_answer_without_sending() {
+        let (monitor, events) = monitor_with_events(Authorization::new(), ssh_ptr_table());
+        let src = std::net::SocketAddr::from((Ipv4Addr::new(10, 0, 0, 2), 5353));
+
+        monitor.handle_packet(&ptr_query_packet("_ssh._tcp.local."), src);
+
+        assert!(matches!(
+            first_monitor_event(&events),
+            Some(MonitorEvent::WouldAnswer { name, qtype, src: event_src })
+                if name == "_ssh._tcp.local." && qtype == RecordType::PTR && event_src == src
+        ));
+    }
+
+    #[test]
+    fn monitor_any_query_emits_would_answer() {
+        let (monitor, events) = monitor_with_events(Authorization::new(), ssh_ptr_table());
+        let src = std::net::SocketAddr::from((Ipv4Addr::new(10, 0, 0, 2), 5353));
+
+        monitor.handle_packet(&query_packet("_ssh._tcp.local.", RecordType::ANY), src);
+
+        assert!(matches!(
+            first_monitor_event(&events),
+            Some(MonitorEvent::WouldAnswer { name, qtype, src: event_src })
+                if name == "_ssh._tcp.local." && qtype == RecordType::ANY && event_src == src
+        ));
+    }
+
+    #[test]
+    fn monitor_query_emits_blocked_for_filtered_source() {
+        let auth = Authorization::new().allow_subnet("192.0.2.0/24".parse().expect("subnet"));
+        let (monitor, events) = monitor_with_events(auth, ssh_ptr_table());
+        let src = std::net::SocketAddr::from((Ipv4Addr::new(10, 0, 0, 2), 5353));
+
+        monitor.handle_packet(&ptr_query_packet("_ssh._tcp.local."), src);
+
+        assert!(matches!(
+            first_monitor_event(&events),
+            Some(MonitorEvent::Blocked {
+                name,
+                qtype,
+                src: event_src,
+                reason: MonitorBlockReason::SourceAddress,
+            }) if name == "_ssh._tcp.local." && qtype == RecordType::PTR && event_src == src
+        ));
+    }
+
+    #[test]
+    fn monitor_query_emits_blocked_for_filtered_instance() {
+        let auth = Authorization::new().allow_instance("Other");
+        let (monitor, events) = monitor_with_events(auth, ssh_ptr_table());
+        let src = std::net::SocketAddr::from((Ipv4Addr::new(10, 0, 0, 2), 5353));
+
+        monitor.handle_packet(&ptr_query_packet("_ssh._tcp.local."), src);
+
+        assert!(matches!(
+            first_monitor_event(&events),
+            Some(MonitorEvent::Blocked {
+                name,
+                qtype,
+                src: event_src,
+                reason: MonitorBlockReason::Instance,
+            }) if name == "_ssh._tcp.local." && qtype == RecordType::PTR && event_src == src
+        ));
+    }
+
+    #[test]
+    fn monitor_response_emits_shared_ptr_for_other_target() {
+        let (monitor, events) = monitor_with_events(Authorization::new(), ssh_ptr_table());
+        let mut msg = Message::new(0, MessageType::Query, OpCode::Query);
+        msg.set_message_type(MessageType::Response)
+            .set_authoritative(true)
+            .set_response_code(ResponseCode::NoError);
+        msg.add_answer(Record::from_rdata(
+            Name::from_utf8("_ssh._tcp.local.").expect("service type"),
+            60,
+            RData::PTR(hickory_proto::rr::rdata::PTR(
+                Name::from_utf8("Other._ssh._tcp.local.").expect("other instance"),
+            )),
+        ));
+        let src = std::net::SocketAddr::from((Ipv4Addr::new(10, 0, 0, 2), 5353));
+
+        monitor.handle_packet(&msg.to_bytes().expect("response bytes"), src);
+
+        assert!(matches!(
+            first_monitor_event(&events),
+            Some(MonitorEvent::SharedPtr { name, target, src: event_src })
+                if name == "_ssh._tcp.local."
+                    && target == "other._ssh._tcp.local."
+                    && event_src == src
+        ));
+    }
+
+    #[test]
+    fn monitor_response_emits_conflict_for_owned_ptr_target() {
+        let (monitor, events) = monitor_with_events(Authorization::new(), ssh_ptr_table());
+        let mut msg = Message::new(0, MessageType::Query, OpCode::Query);
+        msg.set_message_type(MessageType::Response)
+            .set_authoritative(true)
+            .set_response_code(ResponseCode::NoError);
+        msg.add_answer(Record::from_rdata(
+            Name::from_utf8("_ssh._tcp.local.").expect("service type"),
+            60,
+            RData::PTR(hickory_proto::rr::rdata::PTR(
+                Name::from_utf8("Demo._ssh._tcp.local.").expect("our instance"),
+            )),
+        ));
+        let src = std::net::SocketAddr::from((Ipv4Addr::new(10, 0, 0, 2), 5353));
+
+        monitor.handle_packet(&msg.to_bytes().expect("response bytes"), src);
+
+        assert!(matches!(
+            first_monitor_event(&events),
+            Some(MonitorEvent::Conflict { name, qtype, src: event_src })
+                if name == "_ssh._tcp.local." && qtype == RecordType::PTR && event_src == src
+        ));
+    }
+
+    #[test]
+    fn monitor_response_ignores_wrong_source_port() {
+        let (monitor, events) = monitor_with_events(Authorization::new(), ssh_ptr_table());
+        let mut msg = Message::new(0, MessageType::Query, OpCode::Query);
+        msg.set_message_type(MessageType::Response)
+            .set_authoritative(true)
+            .set_response_code(ResponseCode::NoError);
+        msg.add_answer(Record::from_rdata(
+            Name::from_utf8("_ssh._tcp.local.").expect("service type"),
+            60,
+            RData::PTR(hickory_proto::rr::rdata::PTR(
+                Name::from_utf8("Demo._ssh._tcp.local.").expect("our instance"),
+            )),
+        ));
+        let src = std::net::SocketAddr::from((Ipv4Addr::new(10, 0, 0, 2), 12345));
+
+        monitor.handle_packet(&msg.to_bytes().expect("response bytes"), src);
+
+        assert!(first_monitor_event(&events).is_none());
     }
 }
