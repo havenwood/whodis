@@ -65,6 +65,12 @@ pub enum Anomaly {
         src: String,
         instance_count: usize,
     },
+    SourceIpMismatch {
+        name: String,
+        qtype: String,
+        src: String,
+        advertised: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -81,7 +87,8 @@ impl Anomaly {
             Self::MultiSourceUniqueRr { .. }
             | Self::WhodisConflictSignature { .. }
             | Self::CacheFlushRateExceeded { .. }
-            | Self::GoodbyeThenTakeover { .. } => "high",
+            | Self::GoodbyeThenTakeover { .. }
+            | Self::SourceIpMismatch { .. } => "high",
         }
     }
 }
@@ -104,6 +111,7 @@ enum AnomalyKey {
     GoodbyeStorm(String, IpAddr),
     Takeover(String, RecordType, IpAddr, IpAddr),
     ServiceTypeGoodbyeBurst(String, IpAddr),
+    SourceIpMismatch(String, RecordType, IpAddr, IpAddr),
 }
 
 /// Pure, transport-free anomaly tracker. Public so tests and embedders can drive it directly.
@@ -127,9 +135,21 @@ impl AnomalyTracker {
         if !matches!(msg.message_type(), MessageType::Response) {
             return Vec::new();
         }
+        let packet_self_asserts = msg.answers().iter().any(|r| match r.data() {
+            Some(RData::A(a)) => IpAddr::V4(a.0) == src.ip(),
+            Some(RData::AAAA(a)) => IpAddr::V6(a.0) == src.ip(),
+            _ => false,
+        });
         let mut out = Vec::new();
         for record in msg.answers() {
-            observe_record(&mut self.state, record, src.ip(), now, &mut out);
+            observe_record(
+                &mut self.state,
+                record,
+                src.ip(),
+                now,
+                packet_self_asserts,
+                &mut out,
+            );
         }
         if self.state.unique_rr_owners.len() > MAX_TRACKED_NAMES
             && let Some(k) = self.state.unique_rr_owners.keys().next().cloned()
@@ -149,12 +169,15 @@ fn observe_record(
     record: &Record,
     src: IpAddr,
     now: Instant,
+    packet_self_asserts: bool,
     out: &mut Vec<Anomaly>,
 ) {
     let name = record.name().to_string();
     let qtype = record.record_type();
     let cache_flush = record.mdns_cache_flush;
     let ttl = record.ttl();
+
+    check_source_ip_mismatch(state, record, &name, qtype, src, packet_self_asserts, out);
 
     if let Some(RData::SRV(srv)) = record.data()
         && srv
@@ -291,6 +314,37 @@ fn observe_record(
                 src_takeover: src.to_string(),
             });
         }
+    }
+}
+
+fn check_source_ip_mismatch(
+    state: &mut State,
+    record: &Record,
+    name: &str,
+    qtype: RecordType,
+    src: IpAddr,
+    packet_self_asserts: bool,
+    out: &mut Vec<Anomaly>,
+) {
+    if src.is_loopback() || packet_self_asserts {
+        return;
+    }
+    let advertised = match record.data() {
+        Some(RData::A(a)) => IpAddr::V4(a.0),
+        Some(RData::AAAA(a)) => IpAddr::V6(a.0),
+        _ => return,
+    };
+    if advertised == src {
+        return;
+    }
+    let key = AnomalyKey::SourceIpMismatch(name.to_string(), qtype, src, advertised);
+    if state.reported.insert(key) {
+        out.push(Anomaly::SourceIpMismatch {
+            name: name.to_string(),
+            qtype: format!("{qtype:?}"),
+            src: src.to_string(),
+            advertised: advertised.to_string(),
+        });
     }
 }
 
@@ -616,6 +670,118 @@ mod tests {
                 .iter()
                 .any(|a| matches!(a, Anomaly::MultiSourceUniqueRr { .. })),
             "same anomaly should not refire within a session"
+        );
+    }
+
+    fn response_with_two_a(name: &str, ip1: Ipv4Addr, ip2: Ipv4Addr) -> Message {
+        let mut msg = Message::new(0, MessageType::Query, OpCode::Query);
+        msg.set_message_type(MessageType::Response)
+            .set_authoritative(true)
+            .set_response_code(ResponseCode::NoError);
+        let n = Name::from_utf8(name).expect("name");
+        let mut r1 = Record::from_rdata(n.clone(), 120, RData::A(A(ip1)));
+        r1.set_dns_class(DNSClass::IN);
+        msg.add_answer(r1);
+        let mut r2 = Record::from_rdata(n, 120, RData::A(A(ip2)));
+        r2.set_dns_class(DNSClass::IN);
+        msg.add_answer(r2);
+        msg
+    }
+
+    fn response_with_aaaa(name: &str, ip: std::net::Ipv6Addr) -> Message {
+        let mut msg = Message::new(0, MessageType::Query, OpCode::Query);
+        msg.set_message_type(MessageType::Response)
+            .set_authoritative(true)
+            .set_response_code(ResponseCode::NoError);
+        let n = Name::from_utf8(name).expect("name");
+        let mut rec = Record::from_rdata(n, 120, RData::AAAA(hickory_proto::rr::rdata::AAAA(ip)));
+        rec.set_dns_class(DNSClass::IN);
+        msg.add_answer(rec);
+        msg
+    }
+
+    #[test]
+    fn source_ip_mismatch_fires_when_record_claims_unrelated_address() {
+        let mut t = AnomalyTracker::new();
+        let now = Instant::now();
+        let m = response_with_a("Camera.local.", Ipv4Addr::new(10, 0, 0, 50), 120, false);
+        let out = t.observe_at(&m, src("192.168.1.99"), now);
+        assert!(
+            out.iter()
+                .any(|a| matches!(a, Anomaly::SourceIpMismatch { .. })),
+            "expected SourceIpMismatch, got {out:?}"
+        );
+    }
+
+    #[test]
+    fn source_ip_mismatch_does_not_fire_when_advertised_matches_src() {
+        let mut t = AnomalyTracker::new();
+        let now = Instant::now();
+        let m = response_with_a("Camera.local.", Ipv4Addr::new(192, 168, 1, 5), 120, false);
+        let out = t.observe_at(&m, src("192.168.1.5"), now);
+        assert!(
+            !out.iter()
+                .any(|a| matches!(a, Anomaly::SourceIpMismatch { .. })),
+            "self-assert must not fire, got {out:?}"
+        );
+    }
+
+    #[test]
+    fn source_ip_mismatch_does_not_fire_when_other_record_in_packet_matches_src() {
+        let mut t = AnomalyTracker::new();
+        let now = Instant::now();
+        let m = response_with_two_a(
+            "Camera.local.",
+            Ipv4Addr::new(192, 168, 1, 5),
+            Ipv4Addr::new(10, 0, 0, 1),
+        );
+        let out = t.observe_at(&m, src("192.168.1.5"), now);
+        assert!(
+            !out.iter()
+                .any(|a| matches!(a, Anomaly::SourceIpMismatch { .. })),
+            "multi-homed self-assert (one record matches src) must suppress, got {out:?}"
+        );
+    }
+
+    #[test]
+    fn source_ip_mismatch_fires_for_unspecified_address() {
+        let mut t = AnomalyTracker::new();
+        let now = Instant::now();
+        let m = response_with_a("Camera.local.", Ipv4Addr::UNSPECIFIED, 120, true);
+        let out = t.observe_at(&m, src("192.168.1.42"), now);
+        assert!(
+            out.iter()
+                .any(|a| matches!(a, Anomaly::SourceIpMismatch { advertised, .. } if advertised == "0.0.0.0")),
+            "sinkhole flood (0.0.0.0) must fire, got {out:?}"
+        );
+    }
+
+    #[test]
+    fn source_ip_mismatch_does_not_fire_for_loopback_src() {
+        let mut t = AnomalyTracker::new();
+        let now = Instant::now();
+        let m = response_with_a("Camera.local.", Ipv4Addr::new(10, 0, 0, 50), 120, false);
+        let out = t.observe_at(&m, src("127.0.0.1"), now);
+        assert!(
+            !out.iter()
+                .any(|a| matches!(a, Anomaly::SourceIpMismatch { .. })),
+            "loopback src must not fire (test infra carve-out), got {out:?}"
+        );
+    }
+
+    #[test]
+    fn source_ip_mismatch_fires_for_aaaa_when_src_is_v4_and_no_a_self_asserts() {
+        let mut t = AnomalyTracker::new();
+        let now = Instant::now();
+        let m = response_with_aaaa(
+            "Camera.local.",
+            std::net::Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0xdead, 0xbeef),
+        );
+        let out = t.observe_at(&m, src("192.168.1.99"), now);
+        assert!(
+            out.iter()
+                .any(|a| matches!(a, Anomaly::SourceIpMismatch { qtype, .. } if qtype == "AAAA")),
+            "v4 src + AAAA-only with no v4 self-assert must fire, got {out:?}"
         );
     }
 

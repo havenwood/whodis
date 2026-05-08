@@ -959,6 +959,14 @@ fn emit_anomaly_pretty(color: ColorMode, record: &AnomalyRecord<'_>) -> std::io:
                 "service_type_goodbye_burst PTR   {service_type}  src={src} ({instance_count} instances)"
             )
         }
+        crate::detect::Anomaly::SourceIpMismatch {
+            name,
+            qtype,
+            src,
+            advertised,
+        } => {
+            format!("source_ip_mismatch  {qtype:<5} {name}  src={src} -> advertised={advertised}")
+        }
     };
     crate::output::emit_raw(&format!("{chip}  {detail}\n"))
 }
