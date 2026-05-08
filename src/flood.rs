@@ -1,8 +1,10 @@
 //! Disruptive mDNS flooding primitives.
 
+use std::collections::HashSet;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::num::NonZeroU32;
 use std::sync::Arc;
+use std::time::Duration;
 
 use governor::{Quota, RateLimiter};
 use hickory_proto::op::{Message, MessageType, OpCode, ResponseCode};
@@ -196,6 +198,117 @@ pub async fn conflict_host(
     Ok(sent)
 }
 
+/// Discover all instances of a service type via Browser, then `goodbye` each one.
+/// `service_type_fqdn` must be `_xxx._tcp.local.` or `_xxx._udp.local.`.
+pub async fn goodbye_type(
+    mode: Mode,
+    service_type_fqdn: &str,
+    discovery_window: Duration,
+    auth: &Authorization,
+    opts: FloodOptions,
+) -> Result<usize> {
+    auth.warn_once_if_permissive("flood:goodbye-type");
+    validate_service_type_fqdn(service_type_fqdn)?;
+    if !mode.sends_responses() {
+        return Err(Error::InvalidServiceType(format!(
+            "flood requires Authoritative or Custom mode, got {mode:?}"
+        )));
+    }
+
+    let instances = discover_instances(mode, service_type_fqdn, discovery_window).await?;
+    if instances.is_empty() {
+        tracing::warn!(service = %service_type_fqdn, "no instances discovered for service type");
+        return Ok(0);
+    }
+    tracing::info!(
+        service = %service_type_fqdn,
+        count = instances.len(),
+        "goodbye-type: discovered instances"
+    );
+
+    let allowed: Vec<String> = instances
+        .into_iter()
+        .filter(|fqdn| {
+            let ok = auth.permits_instance(&strip_dot(fqdn));
+            if !ok {
+                tracing::warn!(target = %fqdn, "blocked by allow-list");
+            }
+            ok
+        })
+        .collect();
+    if allowed.is_empty() {
+        return Ok(0);
+    }
+    goodbye(mode, &allowed, auth, opts).await
+}
+
+fn validate_service_type_fqdn(s: &str) -> Result<()> {
+    let trimmed = s.trim_end_matches('.');
+    let parts: Vec<&str> = trimmed.split('.').collect();
+    if parts.len() == 3
+        && parts
+            .first()
+            .is_some_and(|p| p.starts_with('_') && p.len() > 1)
+        && matches!(parts.get(1).copied(), Some("_tcp" | "_udp"))
+        && parts
+            .get(2)
+            .is_some_and(|p| p.eq_ignore_ascii_case("local"))
+    {
+        Ok(())
+    } else {
+        Err(Error::InvalidServiceType(s.to_string()))
+    }
+}
+
+async fn discover_instances(
+    mode: Mode,
+    service_type_fqdn: &str,
+    window: Duration,
+) -> Result<Vec<String>> {
+    use crate::browse::{Browser, Event};
+    use crate::types::{Protocol, ServiceType};
+    use tokio_stream::StreamExt;
+
+    let trimmed = service_type_fqdn.trim_end_matches('.');
+    let parts: Vec<&str> = trimmed.split('.').collect();
+    let svc_label = parts
+        .first()
+        .copied()
+        .ok_or_else(|| Error::InvalidServiceType(service_type_fqdn.to_string()))?;
+    let proto = match parts.get(1).copied() {
+        Some("_tcp") => Protocol::Tcp,
+        Some("_udp") => Protocol::Udp,
+        _ => return Err(Error::InvalidServiceType(service_type_fqdn.to_string())),
+    };
+    let svc = ServiceType::new(svc_label, proto);
+    let svc_fqdn_lower = svc.fqdn().to_ascii_lowercase();
+
+    let browser = Browser::new(mode)?;
+    browser.seed_service_type(svc);
+    let cancel = browser.cancel_token();
+    let stream = browser.run();
+
+    let collect_task = tokio::spawn(async move {
+        let mut found: HashSet<String> = HashSet::new();
+        tokio::pin!(stream);
+        while let Some(event) = stream.next().await {
+            if let Event::InstanceFound { instance } | Event::InstanceUpdated { instance } = event
+                && instance.service_type.fqdn().to_ascii_lowercase() == svc_fqdn_lower
+            {
+                found.insert(instance.fqdn());
+            }
+        }
+        found
+    });
+
+    tokio::time::sleep(window).await;
+    cancel.cancel();
+    let collected = collect_task
+        .await
+        .map_err(|e| std::io::Error::other(format!("discovery task: {e}")))?;
+    Ok(collected.into_iter().collect())
+}
+
 fn limiter(
     rate: NonZeroU32,
 ) -> Arc<
@@ -376,6 +489,21 @@ mod tests {
     #[test]
     fn build_conflict_host_rejects_empty_host() {
         assert!(build_conflict_host("", Ipv4Addr::UNSPECIFIED, None).is_err());
+    }
+
+    #[test]
+    fn validate_service_type_fqdn_accepts_tcp_and_udp() {
+        assert!(validate_service_type_fqdn("_googlecast._tcp.local.").is_ok());
+        assert!(validate_service_type_fqdn("_meshcop._udp.local").is_ok());
+    }
+
+    #[test]
+    fn validate_service_type_fqdn_rejects_non_service_shapes() {
+        assert!(validate_service_type_fqdn("Foo.local.").is_err());
+        assert!(validate_service_type_fqdn("Foo._airplay._tcp.local.").is_err());
+        assert!(validate_service_type_fqdn("_airplay._http.local.").is_err());
+        assert!(validate_service_type_fqdn("_airplay._tcp.example.com.").is_err());
+        assert!(validate_service_type_fqdn("").is_err());
     }
 
     #[test]

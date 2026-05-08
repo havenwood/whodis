@@ -26,6 +26,8 @@ const CACHE_FLUSH_LIMIT: usize = 1;
 const GOODBYE_WINDOW: Duration = Duration::from_secs(2);
 const GOODBYE_LIMIT: usize = 5;
 const TAKEOVER_WINDOW: Duration = Duration::from_secs(5);
+const TYPE_GOODBYE_WINDOW: Duration = Duration::from_secs(5);
+const TYPE_GOODBYE_LIMIT: usize = 5;
 const MAX_TRACKED_NAMES: usize = 10_000;
 
 #[derive(Debug, Clone, Serialize)]
@@ -58,6 +60,11 @@ pub enum Anomaly {
         src_goodbye: String,
         src_takeover: String,
     },
+    ServiceTypeGoodbyeBurst {
+        service_type: String,
+        src: String,
+        instance_count: usize,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -70,7 +77,7 @@ impl Anomaly {
     #[must_use]
     pub const fn severity(&self) -> &'static str {
         match self {
-            Self::GoodbyeStorm { .. } => "medium",
+            Self::GoodbyeStorm { .. } | Self::ServiceTypeGoodbyeBurst { .. } => "medium",
             Self::MultiSourceUniqueRr { .. }
             | Self::WhodisConflictSignature { .. }
             | Self::CacheFlushRateExceeded { .. }
@@ -85,6 +92,7 @@ struct State {
     cache_flush_times: HashMap<(String, RecordType, IpAddr), VecDeque<Instant>>,
     goodbye_times: HashMap<(String, IpAddr), VecDeque<Instant>>,
     last_goodbye: HashMap<String, (IpAddr, Instant)>,
+    type_goodbye_targets: HashMap<(String, IpAddr), VecDeque<(Instant, String)>>,
     reported: HashSet<AnomalyKey>,
 }
 
@@ -95,6 +103,7 @@ enum AnomalyKey {
     CacheFlush(String, RecordType, IpAddr),
     GoodbyeStorm(String, IpAddr),
     Takeover(String, RecordType, IpAddr, IpAddr),
+    ServiceTypeGoodbyeBurst(String, IpAddr),
 }
 
 /// Pure, transport-free anomaly tracker. Public so tests and embedders can drive it directly.
@@ -236,6 +245,35 @@ fn observe_record(
                 });
             }
         }
+
+        if qtype == RecordType::PTR
+            && let Some(RData::PTR(ptr)) = record.data()
+        {
+            let target = ptr.0.to_string();
+            let entries = state
+                .type_goodbye_targets
+                .entry((name.clone(), src))
+                .or_default();
+            entries.push_back((now, target));
+            while entries
+                .front()
+                .is_some_and(|(t, _)| now.duration_since(*t) > TYPE_GOODBYE_WINDOW)
+            {
+                entries.pop_front();
+            }
+            let distinct: HashSet<&String> = entries.iter().map(|(_, t)| t).collect();
+            if distinct.len() > TYPE_GOODBYE_LIMIT {
+                let key = AnomalyKey::ServiceTypeGoodbyeBurst(name.clone(), src);
+                if state.reported.insert(key) {
+                    out.push(Anomaly::ServiceTypeGoodbyeBurst {
+                        service_type: name.clone(),
+                        src: src.to_string(),
+                        instance_count: distinct.len(),
+                    });
+                }
+            }
+        }
+
         state.last_goodbye.insert(name, (src, now));
     } else if matches!(
         qtype,
@@ -441,6 +479,65 @@ mod tests {
             !out.iter()
                 .any(|a| matches!(a, Anomaly::CacheFlushRateExceeded { .. })),
             "1.5s gap should not exceed 1pps cache-flush limit"
+        );
+    }
+
+    fn response_with_ptr_goodbye(owner: &str, target: &str) -> Message {
+        let mut msg = Message::new(0, MessageType::Query, OpCode::Query);
+        msg.set_message_type(MessageType::Response)
+            .set_authoritative(true)
+            .set_response_code(ResponseCode::NoError);
+        let n = Name::from_utf8(owner).expect("owner");
+        let t = Name::from_utf8(target).expect("target");
+        let mut rec = Record::from_rdata(n, 0, RData::PTR(hickory_proto::rr::rdata::PTR(t)));
+        rec.set_dns_class(DNSClass::IN);
+        msg.add_answer(rec);
+        msg
+    }
+
+    #[test]
+    fn service_type_goodbye_burst_fires_on_six_distinct_instances() {
+        let mut t = AnomalyTracker::new();
+        let base = Instant::now();
+        let owner = "_googlecast._tcp.local.";
+        let mut anomalies: Vec<Anomaly> = Vec::new();
+        for i in 0..6 {
+            let target = format!("Speaker{i}._googlecast._tcp.local.");
+            let m = response_with_ptr_goodbye(owner, &target);
+            anomalies.extend(t.observe_at(
+                &m,
+                src("10.0.0.1"),
+                base + Duration::from_millis(i * 100),
+            ));
+        }
+        assert!(
+            anomalies
+                .iter()
+                .any(|a| matches!(a, Anomaly::ServiceTypeGoodbyeBurst { .. })),
+            "expected ServiceTypeGoodbyeBurst after 6 distinct instance goodbyes, got {anomalies:?}"
+        );
+    }
+
+    #[test]
+    fn service_type_goodbye_burst_does_not_fire_for_one_repeated_instance() {
+        let mut t = AnomalyTracker::new();
+        let base = Instant::now();
+        let owner = "_googlecast._tcp.local.";
+        let target = "OnlySpeaker._googlecast._tcp.local.";
+        let mut anomalies: Vec<Anomaly> = Vec::new();
+        for i in 0..6 {
+            let m = response_with_ptr_goodbye(owner, target);
+            anomalies.extend(t.observe_at(
+                &m,
+                src("10.0.0.1"),
+                base + Duration::from_millis(i * 100),
+            ));
+        }
+        assert!(
+            !anomalies
+                .iter()
+                .any(|a| matches!(a, Anomaly::ServiceTypeGoodbyeBurst { .. })),
+            "single repeated instance must not fire ServiceTypeGoodbyeBurst (that's GoodbyeStorm), got {anomalies:?}"
         );
     }
 

@@ -180,8 +180,7 @@ pub enum Cmd {
         show_dead: bool,
     },
 
-    /// Passively watch the LAN for mDNS spoofing signatures (multi-source unique RRs,
-    /// cache-flush rate violations, goodbye storms, takeover sequences). Listen-only.
+    /// Watch the LAN for mDNS spoofing signatures. Listen-only.
     Watch {
         /// Watch window in seconds. 0 = until Ctrl-C.
         #[arg(short = 't', long, default_value_t = 0)]
@@ -329,6 +328,32 @@ pub enum FloodCmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Discover all instances of a service type then flood TTL=0 goodbyes for each,
+    /// clearing the type from clients' Bonjour pickers. Disruptive.
+    GoodbyeType {
+        /// Service type fqdn, e.g. `_googlecast._tcp.local.`.
+        #[arg(value_name = "SERVICE")]
+        service: String,
+
+        /// Seconds to listen for instances of the service type before flooding.
+        #[arg(long, default_value_t = 3, value_parser = parse_positive_u64)]
+        discovery_window: u64,
+
+        #[arg(long = "allow-instance", value_name = "NAME")]
+        allow_instance: Vec<String>,
+
+        #[arg(long, default_value_t = 50, value_parser = parse_positive_u32)]
+        rate: u32,
+
+        #[arg(long, default_value_t = 1, conflicts_with = "forever", value_parser = parse_positive_usize)]
+        count: usize,
+
+        #[arg(long)]
+        forever: bool,
+
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Flood A records claiming a `.local` hostname, poisoning client caches so the host
     /// resolves to a sinkhole IP. Optionally also poisons AAAA via --ip6. Disruptive.
     ConflictHost {
@@ -374,6 +399,16 @@ fn parse_positive_u32(s: &str) -> std::result::Result<u32, String> {
 fn parse_positive_usize(s: &str) -> std::result::Result<usize, String> {
     let value = s
         .parse::<usize>()
+        .map_err(|e| format!("expected positive integer: {e}"))?;
+    if value == 0 {
+        return Err("must be at least 1".to_string());
+    }
+    Ok(value)
+}
+
+fn parse_positive_u64(s: &str) -> std::result::Result<u64, String> {
+    let value = s
+        .parse::<u64>()
         .map_err(|e| format!("expected positive integer: {e}"))?;
     if value == 0 {
         return Err("must be at least 1".to_string());
@@ -915,6 +950,15 @@ fn emit_anomaly_pretty(color: ColorMode, record: &AnomalyRecord<'_>) -> std::io:
                 "goodbye_then_takeover {qtype:<5} {name}  goodbye={src_goodbye} -> takeover={src_takeover}"
             )
         }
+        crate::detect::Anomaly::ServiceTypeGoodbyeBurst {
+            service_type,
+            src,
+            instance_count,
+        } => {
+            format!(
+                "service_type_goodbye_burst PTR   {service_type}  src={src} ({instance_count} instances)"
+            )
+        }
     };
     crate::output::emit_raw(&format!("{chip}  {detail}\n"))
 }
@@ -1109,6 +1153,36 @@ async fn run_flood(kind: FloodCmd, scope: Option<crate::scope::Scope>) -> anyhow
                 dry_run,
             };
             flood::conflict_host(Mode::Authoritative, &targets, ip, ip6, &auth, opts).await?
+        }
+        FloodCmd::GoodbyeType {
+            service,
+            discovery_window,
+            allow_instance,
+            rate,
+            count,
+            forever,
+            dry_run,
+        } => {
+            let auth = build_auth(allow_instance, scope);
+            let opts = FloodOptions {
+                rate_pps: NonZeroU32::new(rate).unwrap_or(NonZeroU32::MIN),
+                count: if forever { 0 } else { count },
+                dry_run,
+            };
+            let sent = flood::goodbye_type(
+                Mode::Authoritative,
+                &service,
+                Duration::from_secs(discovery_window),
+                &auth,
+                opts,
+            )
+            .await?;
+            if sent == 0 {
+                tracing::warn!(service = %service, "goodbye-type: no instances on the LAN to goodbye");
+            } else {
+                tracing::info!(sent, "flood complete");
+            }
+            return Ok(());
         }
     };
     if sent == 0 {
@@ -1653,6 +1727,50 @@ mod tests {
     fn cli_requires_ip_for_flood_conflict_host() {
         let err = Cli::try_parse_from(["whodis", "flood", "conflict-host", "Camera.local."]);
         assert!(err.is_err(), "--ip should be required");
+    }
+
+    #[test]
+    #[allow(
+        clippy::panic,
+        reason = "test assertion intentionally panics on wrong variant"
+    )]
+    fn cli_parses_flood_goodbye_type() {
+        let c = Cli::try_parse_from([
+            "whodis",
+            "flood",
+            "goodbye-type",
+            "_googlecast._tcp.local.",
+            "--discovery-window",
+            "5",
+        ])
+        .expect("parse");
+        match c.command {
+            Cmd::Flood {
+                kind:
+                    FloodCmd::GoodbyeType {
+                        ref service,
+                        discovery_window,
+                        ..
+                    },
+            } => {
+                assert_eq!(service, "_googlecast._tcp.local.");
+                assert_eq!(discovery_window, 5);
+            }
+            other => panic!("expected Flood::GoodbyeType, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_rejects_zero_discovery_window() {
+        let err = Cli::try_parse_from([
+            "whodis",
+            "flood",
+            "goodbye-type",
+            "_googlecast._tcp.local.",
+            "--discovery-window",
+            "0",
+        ]);
+        assert!(err.is_err());
     }
 
     #[test]
