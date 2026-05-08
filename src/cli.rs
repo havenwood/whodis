@@ -180,6 +180,20 @@ pub enum Cmd {
         show_dead: bool,
     },
 
+    /// Passively watch the LAN for mDNS spoofing signatures (multi-source unique RRs,
+    /// cache-flush rate violations, goodbye storms, takeover sequences). Listen-only.
+    Watch {
+        /// Watch window in seconds. 0 = until Ctrl-C.
+        #[arg(short = 't', long, default_value_t = 0)]
+        timeout: u64,
+
+        /// Also observe traffic from local interface IPs. Off by default so
+        /// legitimate local mDNS announces don't drown the output. Turn on to
+        /// dogfood `watch` against your own `flood`/`spoof` running on the same host.
+        #[arg(long = "include-local")]
+        include_local: bool,
+    },
+
     /// Capture mDNS traffic to a pcap file.
     Capture {
         /// Output pcap file path. Defaults to `mdns-{timestamp}.pcap` in the current
@@ -299,6 +313,31 @@ pub enum FloodCmd {
     Conflict {
         #[arg(value_name = "INSTANCE")]
         targets: Vec<String>,
+
+        #[arg(long = "allow-instance", value_name = "NAME")]
+        allow_instance: Vec<String>,
+
+        #[arg(long, default_value_t = 50, value_parser = parse_positive_u32)]
+        rate: u32,
+
+        #[arg(long, default_value_t = 1, conflicts_with = "forever", value_parser = parse_positive_usize)]
+        count: usize,
+
+        #[arg(long)]
+        forever: bool,
+
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Flood A records claiming a `.local` hostname, poisoning client caches so the host
+    /// resolves to a sinkhole IP. Disruptive.
+    ConflictHost {
+        #[arg(value_name = "HOST")]
+        targets: Vec<String>,
+
+        /// Sinkhole IPv4 address that targeted hosts will resolve to.
+        #[arg(long, value_name = "IP")]
+        ip: Ipv4Addr,
 
         #[arg(long = "allow-instance", value_name = "NAME")]
         allow_instance: Vec<String>,
@@ -466,6 +505,10 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             crate::output::emit_raw(&cloned.to_toml())?;
         }
         Cmd::Flood { kind } => run_flood(kind, scope).await?,
+        Cmd::Watch {
+            timeout,
+            include_local,
+        } => run_watch(renderer, timeout, include_local).await?,
         Cmd::Capture { pcap, timeout } => {
             let pcap = resolve_capture_path(pcap, scope.as_ref());
             let count = crate::capture::run(&pcap, timeout).await?;
@@ -780,6 +823,105 @@ async fn run_spoof(
     Ok(())
 }
 
+async fn run_watch(renderer: Renderer, timeout: u64, include_local: bool) -> anyhow::Result<()> {
+    let detector = crate::detect::Detector::new(Mode::Listen)?
+        .with_include_local(include_local)
+        .with_event_callback(move |a| {
+            if let Err(e) = emit_anomaly(renderer, &a) {
+                tracing::error!(error = %e, "emit failed");
+            }
+        });
+    let cancel = detector.cancel_token();
+    let task = tokio::spawn(async move { detector.run().await });
+    if timeout > 0 {
+        tokio::time::sleep(Duration::from_secs(timeout)).await;
+    } else {
+        tokio::signal::ctrl_c().await.ok();
+    }
+    cancel.cancel();
+    task.await
+        .map_err(|e| anyhow::anyhow!("watch task failed: {e}"))??;
+    Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct AnomalyRecord<'a> {
+    kind: &'static str,
+    severity: &'static str,
+    #[serde(flatten)]
+    body: &'a crate::detect::Anomaly,
+}
+
+fn emit_anomaly(renderer: Renderer, anomaly: &crate::detect::Anomaly) -> std::io::Result<()> {
+    let record = AnomalyRecord {
+        kind: "anomaly",
+        severity: anomaly.severity(),
+        body: anomaly,
+    };
+    match renderer {
+        Renderer::Jsonl => crate::output::emit_jsonl(&record),
+        Renderer::Pretty(color) => emit_anomaly_pretty(color, &record),
+    }
+}
+
+fn emit_anomaly_pretty(color: ColorMode, record: &AnomalyRecord<'_>) -> std::io::Result<()> {
+    let on = color.enabled();
+    let chip = match record.severity {
+        "high" => paint_anomaly(on, "anomaly high  ", "\x1b[31m"),
+        "medium" => paint_anomaly(on, "anomaly medium", "\x1b[33m"),
+        _ => paint_anomaly(on, "anomaly       ", "\x1b[36m"),
+    };
+    let detail = match record.body {
+        crate::detect::Anomaly::MultiSourceUniqueRr {
+            name,
+            qtype,
+            sources,
+        } => {
+            let parts: Vec<String> = sources
+                .iter()
+                .map(|s| format!("{}={}", s.src, s.rdata))
+                .collect();
+            format!(
+                "multi_source_unique_rr {qtype:<5} {name}  [{}]",
+                parts.join(", ")
+            )
+        }
+        crate::detect::Anomaly::WhodisConflictSignature { name, qtype, src } => {
+            format!("whodis_conflict_signature {qtype:<5} {name}  src={src}")
+        }
+        crate::detect::Anomaly::CacheFlushRateExceeded {
+            name,
+            qtype,
+            src,
+            per_sec,
+        } => {
+            format!("cache_flush_rate_exceeded {qtype:<5} {name}  src={src} ({per_sec}/s)")
+        }
+        crate::detect::Anomaly::GoodbyeStorm { name, src, count } => {
+            format!("goodbye_storm       -     {name}  src={src} ({count} in window)")
+        }
+        crate::detect::Anomaly::GoodbyeThenTakeover {
+            name,
+            qtype,
+            src_goodbye,
+            src_takeover,
+        } => {
+            format!(
+                "goodbye_then_takeover {qtype:<5} {name}  goodbye={src_goodbye} -> takeover={src_takeover}"
+            )
+        }
+    };
+    crate::output::emit_raw(&format!("{chip}  {detail}\n"))
+}
+
+fn paint_anomaly(enabled: bool, body: &str, color: &str) -> String {
+    if enabled {
+        format!("{color}{body}\x1b[0m")
+    } else {
+        body.to_string()
+    }
+}
+
 async fn run_spoof_monitor(
     renderer: Renderer,
     table: crate::spoof::AnswerTable,
@@ -944,6 +1086,23 @@ async fn run_flood(kind: FloodCmd, scope: Option<crate::scope::Scope>) -> anyhow
                 dry_run,
             };
             flood::conflict_rename(Mode::Authoritative, &targets, &auth, opts).await?
+        }
+        FloodCmd::ConflictHost {
+            targets,
+            ip,
+            allow_instance,
+            rate,
+            count,
+            forever,
+            dry_run,
+        } => {
+            let auth = build_auth(allow_instance, scope);
+            let opts = FloodOptions {
+                rate_pps: NonZeroU32::new(rate).unwrap_or(NonZeroU32::MIN),
+                count: if forever { 0 } else { count },
+                dry_run,
+            };
+            flood::conflict_host(Mode::Authoritative, &targets, ip, &auth, opts).await?
         }
     };
     if sent == 0 {
@@ -1273,6 +1432,45 @@ mod tests {
         clippy::panic,
         reason = "test assertion intentionally panics on wrong variant"
     )]
+    fn cli_parses_watch_with_include_local() {
+        let c =
+            Cli::try_parse_from(["whodis", "watch", "--include-local", "-t", "5"]).expect("parse");
+        match c.command {
+            Cmd::Watch {
+                timeout,
+                include_local,
+            } => {
+                assert_eq!(timeout, 5);
+                assert!(include_local);
+            }
+            other => panic!("expected Watch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[allow(
+        clippy::panic,
+        reason = "test assertion intentionally panics on wrong variant"
+    )]
+    fn cli_parses_watch_default_excludes_local() {
+        let c = Cli::try_parse_from(["whodis", "watch"]).expect("parse");
+        match c.command {
+            Cmd::Watch {
+                timeout,
+                include_local,
+            } => {
+                assert_eq!(timeout, 0);
+                assert!(!include_local);
+            }
+            other => panic!("expected Watch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[allow(
+        clippy::panic,
+        reason = "test assertion intentionally panics on wrong variant"
+    )]
     fn cli_parses_capture_without_pcap() {
         let c = Cli::try_parse_from(["whodis", "capture"]).expect("parse");
         match c.command {
@@ -1414,6 +1612,41 @@ mod tests {
         ]);
 
         assert!(err.is_err());
+    }
+
+    #[test]
+    #[allow(
+        clippy::panic,
+        reason = "test assertion intentionally panics on wrong variant"
+    )]
+    fn cli_parses_flood_conflict_host() {
+        let c = Cli::try_parse_from([
+            "whodis",
+            "flood",
+            "conflict-host",
+            "Camera.local.",
+            "--ip",
+            "0.0.0.0",
+        ])
+        .expect("parse");
+        match c.command {
+            Cmd::Flood {
+                kind:
+                    FloodCmd::ConflictHost {
+                        ref targets, ip, ..
+                    },
+            } => {
+                assert_eq!(targets, &vec!["Camera.local.".to_string()]);
+                assert_eq!(ip, Ipv4Addr::UNSPECIFIED);
+            }
+            other => panic!("expected Flood::ConflictHost, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_requires_ip_for_flood_conflict_host() {
+        let err = Cli::try_parse_from(["whodis", "flood", "conflict-host", "Camera.local."]);
+        assert!(err.is_err(), "--ip should be required");
     }
 
     #[test]

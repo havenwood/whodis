@@ -13,7 +13,7 @@ use crate::auth::Authorization;
 use crate::error::{Error, Result};
 use crate::hickory_compat::{MessageExt, RecordExt, SrvExt};
 use crate::mode::Mode;
-use crate::transport::{Destination, Transport};
+use crate::transport::{Destination, Transport, recv_one};
 
 const DEFAULT_TTL: u32 = 120;
 
@@ -813,35 +813,6 @@ async fn run_reannounce(
                 tracing::debug!(announces = count, "reannounce tick");
             }
         }
-    }
-}
-
-async fn recv_one(
-    v4: Option<&Arc<tokio::net::UdpSocket>>,
-    v6: Option<&Arc<tokio::net::UdpSocket>>,
-    buf: &mut [u8],
-) -> std::io::Result<Option<(usize, std::net::SocketAddr)>> {
-    match (v4, v6) {
-        (Some(s4), Some(s6)) => {
-            let mut b6 = vec![0u8; buf.len()];
-            tokio::select! {
-                r = s4.recv_from(buf) => r.map(|(n, a)| Some((n, a))),
-                r = s6.recv_from(&mut b6) => {
-                    match r {
-                        Ok((n, a)) => {
-                            if let (Some(dst), Some(src)) = (buf.get_mut(..n), b6.get(..n)) {
-                                dst.copy_from_slice(src);
-                            }
-                            Ok(Some((n, a)))
-                        }
-                        Err(e) => Err(e),
-                    }
-                },
-            }
-        }
-        (Some(s4), None) => s4.recv_from(buf).await.map(|(n, a)| Some((n, a))),
-        (None, Some(s6)) => s6.recv_from(buf).await.map(|(n, a)| Some((n, a))),
-        (None, None) => Ok(None),
     }
 }
 

@@ -268,6 +268,35 @@ fn build_v6_socket(mode: Mode, ifaces: &[u32]) -> Result<Option<UdpSocket>> {
     Ok(Some(UdpSocket::from_std(std_sock)?))
 }
 
+pub(crate) async fn recv_one(
+    v4: Option<&Arc<UdpSocket>>,
+    v6: Option<&Arc<UdpSocket>>,
+    buf: &mut [u8],
+) -> std::io::Result<Option<(usize, SocketAddr)>> {
+    match (v4, v6) {
+        (Some(s4), Some(s6)) => {
+            let mut b6 = vec![0u8; buf.len()];
+            tokio::select! {
+                r = s4.recv_from(buf) => r.map(|(n, a)| Some((n, a))),
+                r = s6.recv_from(&mut b6) => {
+                    match r {
+                        Ok((n, a)) => {
+                            if let (Some(dst), Some(src)) = (buf.get_mut(..n), b6.get(..n)) {
+                                dst.copy_from_slice(src);
+                            }
+                            Ok(Some((n, a)))
+                        }
+                        Err(e) => Err(e),
+                    }
+                },
+            }
+        }
+        (Some(s4), None) => s4.recv_from(buf).await.map(|(n, a)| Some((n, a))),
+        (None, Some(s6)) => s6.recv_from(buf).await.map(|(n, a)| Some((n, a))),
+        (None, None) => Ok(None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

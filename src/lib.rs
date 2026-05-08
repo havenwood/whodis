@@ -28,6 +28,7 @@ pub mod spoof_template;
 pub mod sweep;
 
 pub mod browse;
+pub mod detect;
 pub mod fingerprint;
 pub mod flood;
 pub mod probe;
