@@ -22,7 +22,7 @@ use crate::mode::Mode;
 use crate::transport::{Transport, recv_one};
 
 const CACHE_FLUSH_WINDOW: Duration = Duration::from_secs(1);
-const CACHE_FLUSH_LIMIT: usize = 1;
+const CACHE_FLUSH_LIMIT: usize = 2;
 const GOODBYE_WINDOW: Duration = Duration::from_secs(2);
 const GOODBYE_LIMIT: usize = 5;
 const TAKEOVER_WINDOW: Duration = Duration::from_secs(5);
@@ -103,7 +103,7 @@ impl Anomaly {
 #[derive(Debug, Default)]
 struct State {
     unique_rr_owners: HashMap<(String, RecordType), HashMap<IpAddr, String>>,
-    cache_flush_times: HashMap<(String, RecordType, IpAddr), VecDeque<Instant>>,
+    cache_flush_times: HashMap<(String, RecordType, IpAddr, String), VecDeque<Instant>>,
     goodbye_times: HashMap<(String, IpAddr), VecDeque<Instant>>,
     last_goodbye: HashMap<String, (IpAddr, Instant)>,
     type_goodbye_targets: HashMap<(String, IpAddr), VecDeque<(Instant, String)>>,
@@ -114,7 +114,7 @@ struct State {
 enum AnomalyKey {
     MultiSource(String, RecordType),
     Whodis(String, RecordType),
-    CacheFlush(String, RecordType, IpAddr),
+    CacheFlush(String, RecordType, IpAddr, String),
     GoodbyeStorm(String, IpAddr),
     Takeover(String, RecordType, IpAddr, IpAddr),
     ServiceTypeGoodbyeBurst(String, IpAddr),
@@ -233,10 +233,11 @@ fn observe_record(
         }
     }
 
-    if cache_flush && ttl > 0 {
+    if cache_flush && ttl > 0 && !is_reverse_dns_name(&name) {
+        let rdata_fp = format_rdata(record);
         let times = state
             .cache_flush_times
-            .entry((name.clone(), qtype, src))
+            .entry((name.clone(), qtype, src, rdata_fp.clone()))
             .or_default();
         times.push_back(now);
         while times
@@ -246,7 +247,7 @@ fn observe_record(
             times.pop_front();
         }
         if times.len() > CACHE_FLUSH_LIMIT {
-            let key = AnomalyKey::CacheFlush(name.clone(), qtype, src);
+            let key = AnomalyKey::CacheFlush(name.clone(), qtype, src, rdata_fp);
             if state.reported.insert(key) {
                 out.push(Anomaly::CacheFlushRateExceeded {
                     name: name.clone(),
@@ -307,10 +308,8 @@ fn observe_record(
         }
 
         state.last_goodbye.insert(name, (src, now));
-    } else if matches!(
-        qtype,
-        RecordType::A | RecordType::AAAA | RecordType::SRV | RecordType::PTR
-    ) && let Some((prev_src, prev_time)) = state.last_goodbye.get(&name)
+    } else if matches!(qtype, RecordType::A | RecordType::AAAA | RecordType::SRV)
+        && let Some((prev_src, prev_time)) = state.last_goodbye.get(&name)
         && *prev_src != src
         && now.duration_since(*prev_time) <= TAKEOVER_WINDOW
     {
@@ -338,23 +337,37 @@ fn check_unsolicited_additionals(
     let mut reachable: HashSet<String> = HashSet::new();
     for r in msg.answers() {
         reachable.insert(normalize_name(&r.name().to_string()));
-        match r.data() {
-            Some(RData::PTR(ptr)) => {
-                reachable.insert(normalize_name(&ptr.0.to_string()));
+        expand_reachable_via_rdata(r, &mut reachable);
+    }
+    // Expand reachability through additional-section SRV/PTR records whose owner is
+    // already reachable. This covers the multi-service Apple/Cast pattern where the
+    // SRV linking instance->host sits in additionals, not answers. Iterate to fixed
+    // point because chains like PTR -> SRV -> A may need multiple passes.
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for r in msg.additionals() {
+            let owner = normalize_name(&r.name().to_string());
+            if !reachable.contains(&owner) {
+                continue;
             }
-            Some(RData::SRV(srv)) => {
-                reachable.insert(normalize_name(&srv.target.to_string()));
+            let before = reachable.len();
+            expand_reachable_via_rdata(r, &mut reachable);
+            if reachable.len() != before {
+                changed = true;
             }
-            _ => {}
         }
     }
     for r in msg.additionals() {
+        let qtype = r.record_type();
+        if !matches!(qtype, RecordType::A | RecordType::AAAA) {
+            continue;
+        }
         let owner_raw = r.name().to_string();
         let owner = normalize_name(&owner_raw);
         if reachable.contains(&owner) {
             continue;
         }
-        let qtype = r.record_type();
         let key = AnomalyKey::UnsolicitedAdditional(owner.clone(), qtype, src);
         if state.reported.insert(key) {
             out.push(Anomaly::UnsolicitedAdditional {
@@ -368,6 +381,23 @@ fn check_unsolicited_additionals(
 
 fn normalize_name(s: &str) -> String {
     s.trim_end_matches('.').to_ascii_lowercase()
+}
+
+fn expand_reachable_via_rdata(record: &Record, reachable: &mut HashSet<String>) {
+    match record.data() {
+        Some(RData::PTR(ptr)) => {
+            reachable.insert(normalize_name(&ptr.0.to_string()));
+        }
+        Some(RData::SRV(srv)) => {
+            reachable.insert(normalize_name(&srv.target.to_string()));
+        }
+        _ => {}
+    }
+}
+
+fn is_reverse_dns_name(s: &str) -> bool {
+    let n = normalize_name(s);
+    n.ends_with(".in-addr.arpa") || n.ends_with(".ip6.arpa")
 }
 
 fn check_source_ip_mismatch(
@@ -563,15 +593,18 @@ mod tests {
 
     #[test]
     fn cache_flush_rate_fires_when_exceeded() {
+        // RFC 6762 §8.2 allows announce + repeat after ~1s (2 in 1s), so 3+ is the
+        // threshold for "exceeded".
         let mut t = AnomalyTracker::new();
         let now = Instant::now();
         let m = response_with_a("Camera.local.", Ipv4Addr::UNSPECIFIED, 120, true);
         drop(t.observe_at(&m, src("10.0.0.1"), now));
+        drop(t.observe_at(&m, src("10.0.0.1"), now + Duration::from_millis(100)));
         let out = t.observe_at(&m, src("10.0.0.1"), now + Duration::from_millis(200));
         assert!(
             out.iter()
                 .any(|a| matches!(a, Anomaly::CacheFlushRateExceeded { .. })),
-            "expected CacheFlushRateExceeded, got {out:?}"
+            "expected CacheFlushRateExceeded for 3-in-1s, got {out:?}"
         );
     }
 
@@ -927,6 +960,138 @@ mod tests {
             !out.iter()
                 .any(|a| matches!(a, Anomaly::UnsolicitedAdditional { .. })),
             "Apple-style PTR-then-SRV additional must not fire, got {out:?}"
+        );
+    }
+
+    #[test]
+    fn unsolicited_additional_does_not_fire_when_srv_in_additionals_links_to_a() {
+        // Cast/Apple multi-service pattern: PTR answer, SRV in additionals owned by
+        // the PTR's target, A in additionals owned by the SRV's target.
+        let mut t = AnomalyTracker::new();
+        let now = Instant::now();
+        let mut msg = Message::new(0, MessageType::Query, OpCode::Query);
+        msg.set_message_type(MessageType::Response)
+            .set_authoritative(true)
+            .set_response_code(ResponseCode::NoError);
+        let st = Name::from_utf8("_googlecast._tcp.local.").expect("st");
+        let inst = Name::from_utf8("9c2aded4._googlecast._tcp.local.").expect("inst");
+        let host = Name::from_utf8("9c2aded4.local.").expect("host");
+        let mut ptr = Record::from_rdata(
+            st,
+            120,
+            RData::PTR(hickory_proto::rr::rdata::PTR(inst.clone())),
+        );
+        ptr.set_dns_class(DNSClass::IN);
+        msg.add_answer(ptr);
+        let mut srv = Record::from_rdata(
+            inst,
+            120,
+            RData::SRV(hickory_proto::rr::rdata::SRV::new(0, 0, 8009, host.clone())),
+        );
+        srv.set_dns_class(DNSClass::IN);
+        msg.add_additional(srv);
+        let mut a = Record::from_rdata(host, 120, RData::A(A(Ipv4Addr::new(192, 168, 50, 224))));
+        a.set_dns_class(DNSClass::IN);
+        msg.add_additional(a);
+        let out = t.observe_at(&msg, src("192.168.50.224"), now);
+        assert!(
+            !out.iter()
+                .any(|a| matches!(a, Anomaly::UnsolicitedAdditional { .. })),
+            "PTR -> SRV (additional) -> A (additional) chain must not fire, got {out:?}"
+        );
+    }
+
+    #[test]
+    fn cache_flush_rate_skips_reverse_dns_names() {
+        let mut t = AnomalyTracker::new();
+        let now = Instant::now();
+        let m = response_with_a(
+            "166.50.168.192.in-addr.arpa.",
+            Ipv4Addr::new(192, 168, 50, 166),
+            120,
+            true,
+        );
+        drop(t.observe_at(&m, src("192.168.50.166"), now));
+        let out = t.observe_at(&m, src("192.168.50.166"), now + Duration::from_millis(200));
+        assert!(
+            !out.iter()
+                .any(|a| matches!(a, Anomaly::CacheFlushRateExceeded { .. })),
+            "reverse-DNS PTRs must not trip cache-flush rate, got {out:?}"
+        );
+    }
+
+    #[test]
+    fn unsolicited_additional_skips_non_a_aaaa_types() {
+        let mut t = AnomalyTracker::new();
+        let now = Instant::now();
+        let mut msg = Message::new(0, MessageType::Query, OpCode::Query);
+        msg.set_message_type(MessageType::Response)
+            .set_authoritative(true)
+            .set_response_code(ResponseCode::NoError);
+        let owner = Name::from_utf8("_printer._tcp.local.").expect("owner");
+        let inst = Name::from_utf8("Foo._printer._tcp.local.").expect("inst");
+        let mut ptr =
+            Record::from_rdata(owner, 120, RData::PTR(hickory_proto::rr::rdata::PTR(inst)));
+        ptr.set_dns_class(DNSClass::IN);
+        msg.add_answer(ptr);
+        let other = Name::from_utf8("Bar._pdl-datastream._tcp.local.").expect("other");
+        let mut txt = Record::from_rdata(
+            other,
+            120,
+            RData::TXT(hickory_proto::rr::rdata::TXT::new(vec!["a=b".to_string()])),
+        );
+        txt.set_dns_class(DNSClass::IN);
+        msg.add_additional(txt);
+        let out = t.observe_at(&msg, src("192.168.50.103"), now);
+        assert!(
+            !out.iter()
+                .any(|a| matches!(a, Anomaly::UnsolicitedAdditional { .. })),
+            "TXT/SRV/PTR/NSEC additionals must not fire unsolicited (multi-service noise), got {out:?}"
+        );
+    }
+
+    #[test]
+    fn goodbye_then_takeover_skips_ptr_records() {
+        let mut t = AnomalyTracker::new();
+        let base = Instant::now();
+        let mut goodbye = Message::new(0, MessageType::Query, OpCode::Query);
+        goodbye
+            .set_message_type(MessageType::Response)
+            .set_authoritative(true)
+            .set_response_code(ResponseCode::NoError);
+        let owner = Name::from_utf8("_remotepairing._tcp.local.").expect("owner");
+        let inst_a = Name::from_utf8("DeviceA._remotepairing._tcp.local.").expect("a");
+        let mut ptr_g = Record::from_rdata(
+            owner.clone(),
+            0,
+            RData::PTR(hickory_proto::rr::rdata::PTR(inst_a)),
+        );
+        ptr_g.set_dns_class(DNSClass::IN);
+        goodbye.add_answer(ptr_g);
+        drop(t.observe_at(&goodbye, src("192.168.50.166"), base));
+
+        let mut announce = Message::new(0, MessageType::Query, OpCode::Query);
+        announce
+            .set_message_type(MessageType::Response)
+            .set_authoritative(true)
+            .set_response_code(ResponseCode::NoError);
+        let inst_b = Name::from_utf8("DeviceB._remotepairing._tcp.local.").expect("b");
+        let mut ptr_a = Record::from_rdata(
+            owner,
+            120,
+            RData::PTR(hickory_proto::rr::rdata::PTR(inst_b)),
+        );
+        ptr_a.set_dns_class(DNSClass::IN);
+        announce.add_answer(ptr_a);
+        let out = t.observe_at(
+            &announce,
+            src("192.168.50.223"),
+            base + Duration::from_secs(2),
+        );
+        assert!(
+            !out.iter()
+                .any(|a| matches!(a, Anomaly::GoodbyeThenTakeover { .. })),
+            "shared PTR rotation must not fire takeover, got {out:?}"
         );
     }
 
