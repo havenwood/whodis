@@ -38,6 +38,7 @@ pub struct AnswerEntry {
 #[derive(Debug, Default)]
 pub struct AnswerTableBuilder {
     entries: Vec<AnswerEntry>,
+    decoys: Vec<Record>,
     ttl: u32,
 }
 
@@ -46,6 +47,7 @@ impl AnswerTableBuilder {
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
+            decoys: Vec::new(),
             ttl: DEFAULT_TTL,
         }
     }
@@ -65,6 +67,23 @@ impl AnswerTableBuilder {
         let name_str = name.into();
         let rec_name = crate::name_util::lax_from_str(&name_str)?;
         self.push_entry(name_str, rec_name, qtype, rdata);
+        Ok(self)
+    }
+
+    /// Add a decoy record to be attached as an additional to every response message.
+    /// Receivers cache records they didn't ask for (RFC 6762 §10.2), so this poisons
+    /// `name` whenever the spoofer answers any legitimate query. For `A` and `AAAA`
+    /// rdata the cache-flush bit is set so the decoy overwrites pre-existing cache
+    /// entries on the receiver.
+    pub fn decoy(mut self, name: impl Into<String>, rdata: RData) -> Result<Self> {
+        let name_str = name.into();
+        let rec_name = crate::name_util::lax_from_str(&name_str)?;
+        let mut rec = Record::from_rdata(rec_name, self.ttl, rdata);
+        rec.set_dns_class(DNSClass::IN);
+        if matches!(rec.record_type(), RecordType::A | RecordType::AAAA) {
+            rec.set_mdns_cache_flush(true);
+        }
+        self.decoys.push(rec);
         Ok(self)
     }
 
@@ -95,8 +114,13 @@ impl AnswerTableBuilder {
     }
 
     #[must_use]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "linear table build: per-entry response, per-owner ANY response, ports, conflict claims"
+    )]
     pub fn build(self) -> AnswerTable {
         let entries = self.entries;
+        let decoys = self.decoys;
         // Reverse-lookup map for chasing additionals (PTR -> SRV/TXT, SRV -> A/AAAA).
         let mut by_key: HashMap<(String, RecordType), Vec<Record>> =
             HashMap::with_capacity(entries.len());
@@ -144,6 +168,9 @@ impl AnswerTableBuilder {
                 msg.add_answer(owned);
             }
             attach_additionals(&mut msg, &e.records, e.qtype, &by_key);
+            for d in &decoys {
+                msg.add_additional(d.clone());
+            }
             if let Ok(bytes) = msg.to_bytes() {
                 let auth_names = auth_names_for_entry(e, &srv_target_to_instances);
                 map.insert(
@@ -173,6 +200,9 @@ impl AnswerTableBuilder {
                 }
                 attach_additionals(&mut msg, &e.records, e.qtype, &by_key);
                 auth_names.extend(auth_names_for_entry(e, &srv_target_to_instances));
+            }
+            for d in &decoys {
+                msg.add_additional(d.clone());
             }
             auth_names.sort_by_key(|name| normalize(name));
             auth_names.dedup_by(|a, b| normalize(a) == normalize(b));
@@ -861,6 +891,30 @@ mod tests {
             .build();
         assert!(t.lookup("spoofed.local.", RecordType::A).is_some());
         assert!(t.lookup("SPOOFED.LOCAL", RecordType::A).is_some());
+    }
+
+    #[test]
+    fn decoy_records_attach_to_every_response_as_additionals() {
+        let t = AnswerTableBuilder::new()
+            .ttl(60)
+            .answer(
+                "spoofed.local.",
+                RecordType::A,
+                RData::A(A(Ipv4Addr::new(192, 168, 1, 42))),
+            )
+            .expect("answer")
+            .decoy("Camera.local.", RData::A(A(Ipv4Addr::UNSPECIFIED)))
+            .expect("decoy")
+            .build();
+        let bytes = t.lookup("spoofed.local.", RecordType::A).expect("lookup");
+        let msg = hickory_proto::op::Message::from_bytes(bytes).expect("parse");
+        let decoy = msg
+            .additionals
+            .iter()
+            .find(|r| r.name().to_string() == "Camera.local.")
+            .expect("decoy in additionals");
+        assert_eq!(decoy.record_type(), RecordType::A);
+        assert!(decoy.mdns_cache_flush, "A decoy must set cache-flush bit");
     }
 
     #[test]

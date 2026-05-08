@@ -26,6 +26,14 @@
 //! name = "Spoofed-AppleTV._airplay._tcp.local."
 //! qtype = "TXT"
 //! txt = ["model=AppleTV11,1", "deviceid=AA:BB:CC:DD:EE:FF"]
+//!
+//! # Decoys ride as additionals on every response, regardless of the query.
+//! # Receivers cache them per RFC 6762 §10.2 without ever asking. For A/AAAA
+//! # the cache-flush bit is set so the decoy overwrites legit cache entries.
+//! [[decoy]]
+//! name = "Camera.local."
+//! qtype = "A"
+//! data = "0.0.0.0"
 //! ```
 
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -43,6 +51,8 @@ struct Raw {
     ttl: u32,
     #[serde(default, rename = "answer")]
     answers: Vec<RawAnswer>,
+    #[serde(default, rename = "decoy")]
+    decoys: Vec<RawAnswer>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -74,6 +84,11 @@ pub fn load(toml_src: &str) -> anyhow::Result<AnswerTable> {
         let qtype = parse_qtype(&entry.qtype)?;
         let rdata = parse_rdata(qtype, &entry)?;
         b = b.answer(entry.name, qtype, rdata)?;
+    }
+    for entry in raw.decoys {
+        let qtype = parse_qtype(&entry.qtype)?;
+        let rdata = parse_rdata(qtype, &entry)?;
+        b = b.decoy(entry.name, rdata)?;
     }
     Ok(b.build())
 }
@@ -126,7 +141,10 @@ fn parse_rdata(qtype: RecordType, entry: &RawAnswer) -> anyhow::Result<RData> {
 
 #[cfg(test)]
 mod tests {
+    use hickory_proto::serialize::binary::BinDecodable;
+
     use super::*;
+    use crate::hickory_compat::RecordExt;
 
     #[test]
     fn loads_a_record_table() {
@@ -163,6 +181,30 @@ mod tests {
         assert!(
             t.lookup("Spoofed._airplay._tcp.local.", RecordType::TXT)
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn loads_decoy_record_attached_to_every_response() {
+        let src = r#"
+            [[answer]]
+            name = "spoofed.local."
+            qtype = "A"
+            data = "10.0.0.1"
+
+            [[decoy]]
+            name = "Camera.local."
+            qtype = "A"
+            data = "0.0.0.0"
+        "#;
+        let t = load(src).expect("load");
+        let bytes = t.lookup("spoofed.local.", RecordType::A).expect("lookup");
+        let msg = hickory_proto::op::Message::from_bytes(bytes).expect("parse");
+        assert!(
+            msg.additionals
+                .iter()
+                .any(|r| r.name().to_string() == "Camera.local."),
+            "expected Camera.local. decoy in additionals"
         );
     }
 

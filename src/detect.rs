@@ -71,6 +71,11 @@ pub enum Anomaly {
         src: String,
         advertised: String,
     },
+    UnsolicitedAdditional {
+        name: String,
+        qtype: String,
+        src: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -83,7 +88,9 @@ impl Anomaly {
     #[must_use]
     pub const fn severity(&self) -> &'static str {
         match self {
-            Self::GoodbyeStorm { .. } | Self::ServiceTypeGoodbyeBurst { .. } => "medium",
+            Self::GoodbyeStorm { .. }
+            | Self::ServiceTypeGoodbyeBurst { .. }
+            | Self::UnsolicitedAdditional { .. } => "medium",
             Self::MultiSourceUniqueRr { .. }
             | Self::WhodisConflictSignature { .. }
             | Self::CacheFlushRateExceeded { .. }
@@ -112,6 +119,7 @@ enum AnomalyKey {
     Takeover(String, RecordType, IpAddr, IpAddr),
     ServiceTypeGoodbyeBurst(String, IpAddr),
     SourceIpMismatch(String, RecordType, IpAddr, IpAddr),
+    UnsolicitedAdditional(String, RecordType, IpAddr),
 }
 
 /// Pure, transport-free anomaly tracker. Public so tests and embedders can drive it directly.
@@ -151,6 +159,7 @@ impl AnomalyTracker {
                 &mut out,
             );
         }
+        check_unsolicited_additionals(&mut self.state, msg, src.ip(), &mut out);
         if self.state.unique_rr_owners.len() > MAX_TRACKED_NAMES
             && let Some(k) = self.state.unique_rr_owners.keys().next().cloned()
         {
@@ -315,6 +324,50 @@ fn observe_record(
             });
         }
     }
+}
+
+fn check_unsolicited_additionals(
+    state: &mut State,
+    msg: &Message,
+    src: IpAddr,
+    out: &mut Vec<Anomaly>,
+) {
+    if src.is_loopback() || msg.additionals().is_empty() {
+        return;
+    }
+    let mut reachable: HashSet<String> = HashSet::new();
+    for r in msg.answers() {
+        reachable.insert(normalize_name(&r.name().to_string()));
+        match r.data() {
+            Some(RData::PTR(ptr)) => {
+                reachable.insert(normalize_name(&ptr.0.to_string()));
+            }
+            Some(RData::SRV(srv)) => {
+                reachable.insert(normalize_name(&srv.target.to_string()));
+            }
+            _ => {}
+        }
+    }
+    for r in msg.additionals() {
+        let owner_raw = r.name().to_string();
+        let owner = normalize_name(&owner_raw);
+        if reachable.contains(&owner) {
+            continue;
+        }
+        let qtype = r.record_type();
+        let key = AnomalyKey::UnsolicitedAdditional(owner.clone(), qtype, src);
+        if state.reported.insert(key) {
+            out.push(Anomaly::UnsolicitedAdditional {
+                name: owner_raw,
+                qtype: format!("{qtype:?}"),
+                src: src.to_string(),
+            });
+        }
+    }
+}
+
+fn normalize_name(s: &str) -> String {
+    s.trim_end_matches('.').to_ascii_lowercase()
 }
 
 fn check_source_ip_mismatch(
@@ -782,6 +835,98 @@ mod tests {
             out.iter()
                 .any(|a| matches!(a, Anomaly::SourceIpMismatch { qtype, .. } if qtype == "AAAA")),
             "v4 src + AAAA-only with no v4 self-assert must fire, got {out:?}"
+        );
+    }
+
+    fn response_with_ptr_answer_and_decoy_a(
+        service_type: &str,
+        instance: &str,
+        decoy_owner: &str,
+        decoy_ip: Ipv4Addr,
+    ) -> Message {
+        let mut msg = Message::new(0, MessageType::Query, OpCode::Query);
+        msg.set_message_type(MessageType::Response)
+            .set_authoritative(true)
+            .set_response_code(ResponseCode::NoError);
+        let owner = Name::from_utf8(service_type).expect("st");
+        let target = Name::from_utf8(instance).expect("inst");
+        let mut ptr = Record::from_rdata(
+            owner,
+            120,
+            RData::PTR(hickory_proto::rr::rdata::PTR(target)),
+        );
+        ptr.set_dns_class(DNSClass::IN);
+        msg.add_answer(ptr);
+        let decoy_name = Name::from_utf8(decoy_owner).expect("decoy");
+        let mut decoy = Record::from_rdata(decoy_name, 120, RData::A(A(decoy_ip)));
+        decoy.set_dns_class(DNSClass::IN);
+        decoy.set_mdns_cache_flush(true);
+        msg.add_additional(decoy);
+        msg
+    }
+
+    fn response_with_ptr_answer_and_legit_srv_additional(
+        service_type: &str,
+        instance: &str,
+    ) -> Message {
+        let mut msg = Message::new(0, MessageType::Query, OpCode::Query);
+        msg.set_message_type(MessageType::Response)
+            .set_authoritative(true)
+            .set_response_code(ResponseCode::NoError);
+        let owner = Name::from_utf8(service_type).expect("st");
+        let inst = Name::from_utf8(instance).expect("inst");
+        let mut ptr = Record::from_rdata(
+            owner,
+            120,
+            RData::PTR(hickory_proto::rr::rdata::PTR(inst.clone())),
+        );
+        ptr.set_dns_class(DNSClass::IN);
+        msg.add_answer(ptr);
+        let host = Name::from_utf8("FakeHost.local.").expect("host");
+        let mut srv = Record::from_rdata(
+            inst,
+            120,
+            RData::SRV(hickory_proto::rr::rdata::SRV::new(0, 0, 7000, host)),
+        );
+        srv.set_dns_class(DNSClass::IN);
+        msg.add_additional(srv);
+        msg
+    }
+
+    #[test]
+    fn unsolicited_additional_fires_on_unreferenced_owner() {
+        let mut t = AnomalyTracker::new();
+        let now = Instant::now();
+        let m = response_with_ptr_answer_and_decoy_a(
+            "_airplay._tcp.local.",
+            "FakeATV._airplay._tcp.local.",
+            "Camera.local.",
+            Ipv4Addr::UNSPECIFIED,
+        );
+        let out = t.observe_at(&m, src("192.168.1.99"), now);
+        assert!(
+            out.iter().any(|a| matches!(
+                a,
+                Anomaly::UnsolicitedAdditional { name, .. }
+                    if name.eq_ignore_ascii_case("Camera.local.")
+            )),
+            "expected UnsolicitedAdditional for Camera.local., got {out:?}"
+        );
+    }
+
+    #[test]
+    fn unsolicited_additional_does_not_fire_on_apple_pattern() {
+        let mut t = AnomalyTracker::new();
+        let now = Instant::now();
+        let m = response_with_ptr_answer_and_legit_srv_additional(
+            "_airplay._tcp.local.",
+            "FakeATV._airplay._tcp.local.",
+        );
+        let out = t.observe_at(&m, src("192.168.1.42"), now);
+        assert!(
+            !out.iter()
+                .any(|a| matches!(a, Anomaly::UnsolicitedAdditional { .. })),
+            "Apple-style PTR-then-SRV additional must not fire, got {out:?}"
         );
     }
 

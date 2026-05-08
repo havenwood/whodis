@@ -967,6 +967,9 @@ fn emit_anomaly_pretty(color: ColorMode, record: &AnomalyRecord<'_>) -> std::io:
         } => {
             format!("source_ip_mismatch  {qtype:<5} {name}  src={src} -> advertised={advertised}")
         }
+        crate::detect::Anomaly::UnsolicitedAdditional { name, qtype, src } => {
+            format!("unsolicited_additional {qtype:<5} {name}  src={src}")
+        }
     };
     crate::output::emit_raw(&format!("{chip}  {detail}\n"))
 }
