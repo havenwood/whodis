@@ -1,6 +1,6 @@
 //! CLI argument parsing and subcommand dispatch.
 
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -330,7 +330,7 @@ pub enum FloodCmd {
         dry_run: bool,
     },
     /// Flood A records claiming a `.local` hostname, poisoning client caches so the host
-    /// resolves to a sinkhole IP. Disruptive.
+    /// resolves to a sinkhole IP. Optionally also poisons AAAA via --ip6. Disruptive.
     ConflictHost {
         #[arg(value_name = "HOST")]
         targets: Vec<String>,
@@ -338,6 +338,11 @@ pub enum FloodCmd {
         /// Sinkhole IPv4 address that targeted hosts will resolve to.
         #[arg(long, value_name = "IP")]
         ip: Ipv4Addr,
+
+        /// Optional sinkhole IPv6 address. When given, an AAAA record with the
+        /// cache-flush bit is added to the same response packet alongside the A.
+        #[arg(long, value_name = "IP6")]
+        ip6: Option<Ipv6Addr>,
 
         #[arg(long = "allow-instance", value_name = "NAME")]
         allow_instance: Vec<String>,
@@ -1090,6 +1095,7 @@ async fn run_flood(kind: FloodCmd, scope: Option<crate::scope::Scope>) -> anyhow
         FloodCmd::ConflictHost {
             targets,
             ip,
+            ip6,
             allow_instance,
             rate,
             count,
@@ -1102,7 +1108,7 @@ async fn run_flood(kind: FloodCmd, scope: Option<crate::scope::Scope>) -> anyhow
                 count: if forever { 0 } else { count },
                 dry_run,
             };
-            flood::conflict_host(Mode::Authoritative, &targets, ip, &auth, opts).await?
+            flood::conflict_host(Mode::Authoritative, &targets, ip, ip6, &auth, opts).await?
         }
     };
     if sent == 0 {
@@ -1647,6 +1653,34 @@ mod tests {
     fn cli_requires_ip_for_flood_conflict_host() {
         let err = Cli::try_parse_from(["whodis", "flood", "conflict-host", "Camera.local."]);
         assert!(err.is_err(), "--ip should be required");
+    }
+
+    #[test]
+    #[allow(
+        clippy::panic,
+        reason = "test assertion intentionally panics on wrong variant"
+    )]
+    fn cli_parses_flood_conflict_host_with_ip6() {
+        let c = Cli::try_parse_from([
+            "whodis",
+            "flood",
+            "conflict-host",
+            "Camera.local.",
+            "--ip",
+            "0.0.0.0",
+            "--ip6",
+            "::",
+        ])
+        .expect("parse");
+        match c.command {
+            Cmd::Flood {
+                kind: FloodCmd::ConflictHost { ip, ip6, .. },
+            } => {
+                assert_eq!(ip, Ipv4Addr::UNSPECIFIED);
+                assert_eq!(ip6, Some(Ipv6Addr::UNSPECIFIED));
+            }
+            other => panic!("expected Flood::ConflictHost, got {other:?}"),
+        }
     }
 
     #[test]

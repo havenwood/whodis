@@ -1,12 +1,12 @@
 //! Disruptive mDNS flooding primitives.
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use governor::{Quota, RateLimiter};
 use hickory_proto::op::{Message, MessageType, OpCode, ResponseCode};
-use hickory_proto::rr::rdata::{A, PTR, SRV, TXT};
+use hickory_proto::rr::rdata::{A, AAAA, PTR, SRV, TXT};
 use hickory_proto::rr::{DNSClass, Name, RData, Record};
 use hickory_proto::serialize::binary::BinEncodable;
 
@@ -145,6 +145,7 @@ pub async fn conflict_host(
     mode: Mode,
     hosts: &[String],
     ip: Ipv4Addr,
+    ip6: Option<Ipv6Addr>,
     auth: &Authorization,
     opts: FloodOptions,
 ) -> Result<usize> {
@@ -163,7 +164,7 @@ pub async fn conflict_host(
             tracing::warn!(target = %host, "blocked by allow-list");
             continue;
         }
-        packets.push((host.as_str(), build_conflict_host(host, ip)?));
+        packets.push((host.as_str(), build_conflict_host(host, ip, ip6)?));
     }
     if packets.is_empty() {
         return Ok(0);
@@ -247,17 +248,24 @@ fn build_conflict(fqdn: &str) -> Result<Vec<u8>> {
     Ok(msg.to_bytes()?)
 }
 
-fn build_conflict_host(host: &str, ip: Ipv4Addr) -> Result<Vec<u8>> {
+fn build_conflict_host(host: &str, ip: Ipv4Addr, ip6: Option<Ipv6Addr>) -> Result<Vec<u8>> {
     let name = crate::name_util::lax_from_str(host)?;
     let mut msg = Message::new(0, MessageType::Query, OpCode::Query);
     msg.set_message_type(MessageType::Response)
         .set_authoritative(true)
         .set_response_code(ResponseCode::NoError);
 
-    let mut a = Record::from_rdata(name, 120, RData::A(A(ip)));
+    let mut a = Record::from_rdata(name.clone(), 120, RData::A(A(ip)));
     a.set_dns_class(DNSClass::IN);
     a.set_mdns_cache_flush(true);
     msg.add_answer(a);
+
+    if let Some(ip6) = ip6 {
+        let mut aaaa = Record::from_rdata(name, 120, RData::AAAA(AAAA(ip6)));
+        aaaa.set_dns_class(DNSClass::IN);
+        aaaa.set_mdns_cache_flush(true);
+        msg.add_answer(aaaa);
+    }
 
     Ok(msg.to_bytes()?)
 }
@@ -342,7 +350,8 @@ mod tests {
 
     #[test]
     fn build_conflict_host_produces_one_a_record_with_cache_flush() {
-        let bytes = build_conflict_host("Camera.local.", Ipv4Addr::UNSPECIFIED).expect("build");
+        let bytes =
+            build_conflict_host("Camera.local.", Ipv4Addr::UNSPECIFIED, None).expect("build");
         let msg = hickory_proto::op::Message::from_bytes(&bytes).expect("parse");
         assert_eq!(msg.answers().len(), 1);
         assert!(msg.metadata.authoritative);
@@ -358,15 +367,38 @@ mod tests {
 
     #[test]
     fn build_conflict_host_accepts_host_without_trailing_dot() {
-        let bytes =
-            build_conflict_host("Camera.local", Ipv4Addr::new(192, 168, 1, 1)).expect("build");
+        let bytes = build_conflict_host("Camera.local", Ipv4Addr::new(192, 168, 1, 1), None)
+            .expect("build");
         let msg = hickory_proto::op::Message::from_bytes(&bytes).expect("parse");
         assert_eq!(msg.answers().len(), 1);
     }
 
     #[test]
     fn build_conflict_host_rejects_empty_host() {
-        assert!(build_conflict_host("", Ipv4Addr::UNSPECIFIED).is_err());
+        assert!(build_conflict_host("", Ipv4Addr::UNSPECIFIED, None).is_err());
+    }
+
+    #[test]
+    fn build_conflict_host_includes_aaaa_when_ip6_given() {
+        let bytes = build_conflict_host(
+            "Camera.local.",
+            Ipv4Addr::UNSPECIFIED,
+            Some(Ipv6Addr::UNSPECIFIED),
+        )
+        .expect("build");
+        let msg = hickory_proto::op::Message::from_bytes(&bytes).expect("parse");
+        assert_eq!(msg.answers().len(), 2);
+        let a = msg.answers().first().expect("a");
+        let aaaa = msg.answers().get(1).expect("aaaa");
+        assert_eq!(a.record_type(), hickory_proto::rr::RecordType::A);
+        assert_eq!(aaaa.record_type(), hickory_proto::rr::RecordType::AAAA);
+        assert_eq!(aaaa.name().to_string(), "Camera.local.");
+        assert_eq!(aaaa.ttl(), 120);
+        assert!(aaaa.mdns_cache_flush, "AAAA cache-flush bit must be set");
+        assert!(matches!(
+            aaaa.data(),
+            Some(hickory_proto::rr::RData::AAAA(addr)) if addr.0 == Ipv6Addr::UNSPECIFIED
+        ));
     }
 
     #[test]
