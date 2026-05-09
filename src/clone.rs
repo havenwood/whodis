@@ -12,6 +12,7 @@ use hickory_proto::serialize::binary::{BinDecodable, BinEncodable};
 use crate::error::{Error, Result};
 use crate::hickory_compat::{MessageExt, RecordExt, SrvExt, TxtExt};
 use crate::mode::Mode;
+use crate::name_util::toml_quote;
 use crate::transport::{Destination, Transport};
 
 #[derive(Debug, Clone, Default)]
@@ -105,25 +106,6 @@ impl ClonedInstance {
         }
         s
     }
-}
-
-fn toml_quote(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for ch in s.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => {
-                let _r = write!(out, "\\u{:04X}", c as u32);
-            }
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
 }
 
 pub async fn clone_instance(instance_fqdn: &str, timeout: Duration) -> Result<ClonedInstance> {
@@ -329,13 +311,6 @@ mod tests {
     }
 
     #[test]
-    fn toml_quote_escapes_special_chars() {
-        assert_eq!(toml_quote("plain"), r#""plain""#);
-        assert_eq!(toml_quote("with\"quote"), r#""with\"quote""#);
-        assert_eq!(toml_quote("back\\slash"), r#""back\\slash""#);
-    }
-
-    #[test]
     fn empty_when_no_records_absorbed() {
         let c = ClonedInstance {
             instance_fqdn: "X._airplay._tcp.local.".into(),
@@ -352,19 +327,6 @@ mod tests {
         // return the service fqdn based on the last three dot-separated tokens.
         let p = parse_instance("v1.0 Speaker._airplay._tcp.local.").expect("parse");
         assert_eq!(p.service_fqdn, "_airplay._tcp.local.");
-    }
-
-    #[test]
-    fn toml_quote_escapes_control_characters() {
-        // Characters below 0x20 (other than \n and \t) should be escaped as \uXXXX.
-        let s = toml_quote("\x01");
-        assert_eq!(s, "\"\\u0001\"");
-    }
-
-    #[test]
-    fn toml_quote_escapes_newline_and_tab() {
-        assert_eq!(toml_quote("a\nb"), "\"a\\nb\"");
-        assert_eq!(toml_quote("a\tb"), "\"a\\tb\"");
     }
 
     #[test]

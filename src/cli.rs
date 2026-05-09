@@ -283,14 +283,21 @@ pub enum Cmd {
         http_host: Option<Ipv4Addr>,
     },
 
-    /// Capture a real LAN instance and emit a TOML answer table mimicking it.
+    /// Capture a real LAN device and emit a TOML answer table mimicking it.
     Clone {
-        /// Instance fqdn, e.g. `LivingRoomTV._airplay._tcp.local.`.
+        /// mDNS instance fqdn (e.g. `LivingRoomTV._airplay._tcp.local.`) or, with
+        /// `--ssdp`, an `SSDP` USN (e.g. `uuid:abc::urn:schemas-upnp-org:device:MediaRenderer:1`).
         instance: String,
 
         /// Listen window in seconds. Exits non-zero if no records arrive in time.
         #[arg(short = 't', long, default_value_t = 5)]
         timeout: u64,
+
+        /// Clone an `SSDP` / `UPnP` device. The positional argument is the USN.
+        /// Fetches the device's LOCATION URL and embeds the description XML
+        /// in the emitted TOML.
+        #[arg(long)]
+        ssdp: bool,
     },
 
     /// Send goodbye or conflict-rename floods. Disruptive.
@@ -630,11 +637,19 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
                 crate::output::emit_host_summaries(renderer, &summaries)?;
             }
         }
-        Cmd::Clone { instance, timeout } => {
-            let cloned =
-                crate::clone::clone_instance(&instance, std::time::Duration::from_secs(timeout))
-                    .await?;
-            crate::output::emit_raw(&cloned.to_toml())?;
+        Cmd::Clone {
+            instance,
+            timeout,
+            ssdp,
+        } => {
+            let dur = std::time::Duration::from_secs(timeout);
+            if ssdp {
+                let cloned = crate::ssdp::clone_device(&instance, dur).await?;
+                crate::output::emit_raw(&cloned.to_toml())?;
+            } else {
+                let cloned = crate::clone::clone_instance(&instance, dur).await?;
+                crate::output::emit_raw(&cloned.to_toml())?;
+            }
         }
         Cmd::Flood { kind } => run_flood(kind, scope).await?,
         Cmd::Watch {
@@ -2330,6 +2345,42 @@ mod tests {
     #[test]
     fn debug_assert_clap_command_renders() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    #[allow(
+        clippy::panic,
+        reason = "test assertion intentionally panics on wrong variant"
+    )]
+    fn cli_parses_clone_with_ssdp() {
+        let c = Cli::try_parse_from([
+            "whodis",
+            "clone",
+            "uuid:abc::urn:schemas-upnp-org:device:MediaRenderer:1",
+            "--ssdp",
+        ])
+        .expect("parse");
+        match c.command {
+            Cmd::Clone { instance, ssdp, .. } => {
+                assert!(instance.starts_with("uuid:abc::"));
+                assert!(ssdp);
+            }
+            other => panic!("expected Clone, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[allow(
+        clippy::panic,
+        reason = "test assertion intentionally panics on wrong variant"
+    )]
+    fn cli_parses_clone_default_is_mdns() {
+        let c =
+            Cli::try_parse_from(["whodis", "clone", "Foo._airplay._tcp.local."]).expect("parse");
+        match c.command {
+            Cmd::Clone { ssdp, .. } => assert!(!ssdp),
+            other => panic!("expected Clone, got {other:?}"),
+        }
     }
 
     #[test]
