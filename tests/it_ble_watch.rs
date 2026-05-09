@@ -57,6 +57,7 @@ async fn watcher_emits_arrived_and_classification_for_iphone_ad() {
                 BleAnomaly::LockStateChange { .. } => "lock",
                 BleAnomaly::DeviceClassClassification { .. } => "class",
                 BleAnomaly::UnknownContinuityType { .. } => "unknown",
+                BleAnomaly::ProximityChange { .. } => "proximity",
             })
             .collect()
     };

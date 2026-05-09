@@ -57,6 +57,12 @@ pub enum BleAnomaly {
         ty: u8,
         count: usize,
     },
+    ProximityChange {
+        peripheral_id: PeripheralId,
+        prev_rssi: i16,
+        curr_rssi: i16,
+        delta_dbm: i16,
+    },
 }
 
 impl BleAnomaly {
@@ -90,6 +96,10 @@ const DEPARTED_AFTER: Duration = Duration::from_secs(600);
 /// Threshold for unknown Continuity type observations before emitting anomaly.
 const UNKNOWN_TY_THRESHOLD: usize = 5;
 
+/// Window inside which two RSSI samples are considered a single trend.
+/// Older samples don't count as the "previous" comparison point.
+const PROXIMITY_WINDOW: Duration = Duration::from_mins(1);
+
 const fn lock_state_from_wake(wake_status: u8) -> LockState {
     // The high bit of NearbyInfo's wake_status correlates with screen-on state
     // in observed iOS broadcasts. Best-effort heuristic, not a Bluetooth SIG
@@ -108,6 +118,8 @@ struct PeripheralState {
     last_seen: SystemTime,
     last_wake_status: Option<u8>,
     classification: Option<DeviceClass>,
+    last_rssi: Option<i16>,
+    last_rssi_at: Option<SystemTime>,
 }
 
 /// Pure-logic recon anomaly tracker. Public so embedders can drive it
@@ -117,12 +129,24 @@ pub struct AnomalyTracker {
     peripherals: HashMap<PeripheralId, PeripheralState>,
     unknown_ty_counts: HashMap<u8, usize>,
     reported: HashSet<BleAnomalyKey>,
+    proximity_threshold_dbm: Option<i16>,
 }
 
 impl AnomalyTracker {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Enable proximity-change tracking. Emits a `ProximityChange` anomaly
+    /// whenever the absolute RSSI delta between two consecutive observations
+    /// of the same peripheral within `PROXIMITY_WINDOW` is at least
+    /// `threshold_dbm`. Off by default — proximity events are unbounded
+    /// (no dedup), so the threshold is the only noise control.
+    #[must_use]
+    pub const fn with_proximity_threshold(mut self, threshold_dbm: i16) -> Self {
+        self.proximity_threshold_dbm = Some(threshold_dbm);
+        self
     }
 
     /// Observe one advertisement at the current real-time clock.
@@ -169,8 +193,37 @@ impl AnomalyTracker {
                 last_seen: now,
                 last_wake_status: None,
                 classification: None,
+                last_rssi: None,
+                last_rssi_at: None,
             });
         entry.last_seen = now;
+
+        // Proximity-change: emit when |curr - prev| >= threshold and prev is recent.
+        if let Some(threshold) = self.proximity_threshold_dbm {
+            let curr_rssi = ad.rssi;
+            let prior = self.peripherals.get(&ad.peripheral_id).and_then(|s| {
+                match (s.last_rssi, s.last_rssi_at) {
+                    (Some(r), Some(t)) => Some((r, t)),
+                    _ => None,
+                }
+            });
+            if let Some((prev_rssi, prev_at)) = prior {
+                let age = now.duration_since(prev_at).unwrap_or(Duration::ZERO);
+                let delta = curr_rssi.saturating_sub(prev_rssi);
+                if age <= PROXIMITY_WINDOW && delta.unsigned_abs() >= threshold.unsigned_abs() {
+                    out.push(BleAnomaly::ProximityChange {
+                        peripheral_id: ad.peripheral_id.clone(),
+                        prev_rssi,
+                        curr_rssi,
+                        delta_dbm: delta,
+                    });
+                }
+            }
+            if let Some(state) = self.peripherals.get_mut(&ad.peripheral_id) {
+                state.last_rssi = Some(curr_rssi);
+                state.last_rssi_at = Some(now);
+            }
+        }
 
         // Decode Continuity payloads once — used by AirDrop / Unknown / lock branches and classification.
         let payloads = ad
@@ -335,6 +388,12 @@ impl Watcher {
     #[must_use]
     pub fn on_anomaly(mut self, cb: impl Fn(BleAnomaly) + Send + Sync + 'static) -> Self {
         self.on_anomaly = Some(Arc::new(cb));
+        self
+    }
+
+    #[must_use]
+    pub fn with_proximity_threshold(mut self, threshold_dbm: i16) -> Self {
+        self.tracker = self.tracker.with_proximity_threshold(threshold_dbm);
         self
     }
 
@@ -672,6 +731,90 @@ mod lock_state_tests {
                 .iter()
                 .any(|a| matches!(a, BleAnomaly::LockStateChange { .. })),
             "got {same:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod proximity_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn ad_with_rssi(id: &str, rssi: i16) -> BleAdvertisement {
+        BleAdvertisement {
+            peripheral_id: PeripheralId::new(id),
+            address_type: None,
+            rssi,
+            local_name: None,
+            manufacturer_data: BTreeMap::new(),
+            service_uuids: vec![],
+            tx_power: None,
+            timestamp: SystemTime::UNIX_EPOCH,
+        }
+    }
+
+    #[test]
+    fn proximity_disabled_by_default() {
+        let mut t = AnomalyTracker::new();
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+        drop(t.observe_at(&ad_with_rssi("p1", -90), now));
+        let next = t.observe_at(&ad_with_rssi("p1", -40), now + Duration::from_secs(1));
+        assert!(
+            !next
+                .iter()
+                .any(|a| matches!(a, BleAnomaly::ProximityChange { .. })),
+            "no proximity threshold set, expected no anomaly, got {next:?}"
+        );
+    }
+
+    #[test]
+    fn approaching_emits_proximity_change() {
+        let mut t = AnomalyTracker::new().with_proximity_threshold(20);
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+        drop(t.observe_at(&ad_with_rssi("p1", -90), now));
+        let approaching = t.observe_at(&ad_with_rssi("p1", -40), now + Duration::from_secs(1));
+        assert!(
+            approaching.iter().any(|a| matches!(
+                a,
+                BleAnomaly::ProximityChange {
+                    prev_rssi: -90,
+                    curr_rssi: -40,
+                    delta_dbm: 50,
+                    ..
+                }
+            )),
+            "got {approaching:?}"
+        );
+    }
+
+    #[test]
+    fn delta_below_threshold_no_emit() {
+        let mut t = AnomalyTracker::new().with_proximity_threshold(20);
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+        drop(t.observe_at(&ad_with_rssi("p1", -60), now));
+        let small = t.observe_at(&ad_with_rssi("p1", -55), now + Duration::from_secs(1));
+        assert!(
+            !small
+                .iter()
+                .any(|a| matches!(a, BleAnomaly::ProximityChange { .. })),
+            "delta 5 dBm < threshold 20, got {small:?}"
+        );
+    }
+
+    #[test]
+    fn stale_prev_rssi_does_not_compare() {
+        let mut t = AnomalyTracker::new().with_proximity_threshold(20);
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+        drop(t.observe_at(&ad_with_rssi("p1", -90), now));
+        // Wait past PROXIMITY_WINDOW (60s). Note: this also exceeds DEPARTED_AFTER
+        // only at 600s, so the peripheral is still "present" for presence purposes.
+        let later = now + Duration::from_mins(2);
+        let next = t.observe_at(&ad_with_rssi("p1", -40), later);
+        assert!(
+            !next
+                .iter()
+                .any(|a| matches!(a, BleAnomaly::ProximityChange { .. })),
+            "prev sample is older than PROXIMITY_WINDOW; got {next:?}"
         );
     }
 }

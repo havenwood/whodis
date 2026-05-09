@@ -1440,7 +1440,8 @@ fn ble_anomaly_peripheral_id(a: &crate::ble::BleAnomaly) -> Option<&crate::ble::
         BleAnomaly::DevicePresence { peripheral_id, .. }
         | BleAnomaly::AirDropEveryoneMode { peripheral_id, .. }
         | BleAnomaly::LockStateChange { peripheral_id, .. }
-        | BleAnomaly::DeviceClassClassification { peripheral_id, .. } => Some(peripheral_id),
+        | BleAnomaly::DeviceClassClassification { peripheral_id, .. }
+        | BleAnomaly::ProximityChange { peripheral_id, .. } => Some(peripheral_id),
         BleAnomaly::UnknownContinuityType { .. } => None,
     }
 }
