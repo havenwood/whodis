@@ -66,13 +66,133 @@ impl BleAnomaly {
 
 /// Dedup key. One [`BleAnomaly`] variant lands once per session per key.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[allow(dead_code, reason = "consumed by AnomalyTracker dedup in Task 2")]
 pub(crate) enum BleAnomalyKey {
     Presence(PeripheralId, PresenceState),
+    #[allow(dead_code, reason = "consumed by Tasks 3-4")]
     AirDropEveryone(PeripheralId),
+    #[allow(dead_code, reason = "consumed by Task 4")]
     LockChange(PeripheralId),
+    #[allow(dead_code, reason = "consumed by Task 3")]
     Classification(PeripheralId),
+    #[allow(dead_code, reason = "consumed by Task 3")]
     UnknownContinuityType(u8),
+}
+
+use std::collections::{HashMap, HashSet};
+use std::time::Duration;
+
+use crate::ble::BleAdvertisement;
+
+/// Threshold after which a peripheral is considered Departed.
+#[allow(clippy::duration_suboptimal_units, reason = "from_mins not available")]
+const DEPARTED_AFTER: Duration = Duration::from_secs(600);
+
+#[derive(Debug, Clone)]
+struct PeripheralState {
+    #[allow(dead_code, reason = "consumed by Task 4 lock-state inference")]
+    first_seen: SystemTime,
+    last_seen: SystemTime,
+    #[allow(dead_code, reason = "consumed by Task 4 lock-state inference")]
+    last_wake_status: Option<u8>,
+    #[allow(dead_code, reason = "consumed by Task 3 classification tracking")]
+    classification: Option<DeviceClass>,
+}
+
+/// Pure-logic recon anomaly tracker. Public so embedders can drive it
+/// directly without sockets.
+#[derive(Debug, Default)]
+pub struct AnomalyTracker {
+    peripherals: HashMap<PeripheralId, PeripheralState>,
+    #[allow(dead_code, reason = "consumed by Task 3 unknown-type tracking")]
+    unknown_ty_counts: HashMap<u8, usize>,
+    reported: HashSet<BleAnomalyKey>,
+}
+
+impl AnomalyTracker {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Observe one advertisement at the current real-time clock.
+    pub fn observe(&mut self, ad: &BleAdvertisement) -> Vec<BleAnomaly> {
+        self.observe_at(ad, SystemTime::now())
+    }
+
+    /// Test hook: explicit clock so windowed checks are deterministic.
+    pub fn observe_at(&mut self, ad: &BleAdvertisement, now: SystemTime) -> Vec<BleAnomaly> {
+        let mut out = Vec::new();
+        let id = ad.peripheral_id.clone();
+
+        // Presence: Arrived (first sight or post-Departed re-arrival).
+        let arrived_now = self.peripherals.get(&id).is_none_or(|state| {
+            now.duration_since(state.last_seen)
+                .unwrap_or(Duration::ZERO)
+                > DEPARTED_AFTER
+        });
+        if arrived_now {
+            // Clear a prior Departed dedup so the next departure can fire again.
+            self.reported.remove(&BleAnomalyKey::Presence(
+                id.clone(),
+                PresenceState::Departed,
+            ));
+            let key = BleAnomalyKey::Presence(id.clone(), PresenceState::Arrived);
+            if self.reported.insert(key) {
+                out.push(BleAnomaly::DevicePresence {
+                    peripheral_id: id.clone(),
+                    state: PresenceState::Arrived,
+                    since: now,
+                });
+            }
+        }
+
+        let entry = self
+            .peripherals
+            .entry(id)
+            .or_insert_with(|| PeripheralState {
+                first_seen: now,
+                last_seen: now,
+                last_wake_status: None,
+                classification: None,
+            });
+        entry.last_seen = now;
+
+        out
+    }
+
+    /// Periodic tick: emit `Departed` for peripherals not seen in
+    /// `DEPARTED_AFTER`. Call this once per ~30s from the run loop.
+    pub fn tick_at(&mut self, now: SystemTime) -> Vec<BleAnomaly> {
+        let mut out = Vec::new();
+        let stale: Vec<(PeripheralId, SystemTime)> = self
+            .peripherals
+            .iter()
+            .filter_map(|(id, state)| {
+                let dur = now
+                    .duration_since(state.last_seen)
+                    .unwrap_or(Duration::ZERO);
+                if dur > DEPARTED_AFTER {
+                    Some((id.clone(), state.last_seen))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for (id, last_seen) in stale {
+            // Clear the prior Arrived dedup so re-arrival fires fresh.
+            self.reported
+                .remove(&BleAnomalyKey::Presence(id.clone(), PresenceState::Arrived));
+            let key = BleAnomalyKey::Presence(id.clone(), PresenceState::Departed);
+            if self.reported.insert(key) {
+                out.push(BleAnomaly::DevicePresence {
+                    peripheral_id: id,
+                    state: PresenceState::Departed,
+                    since: last_seen,
+                });
+            }
+        }
+        out
+    }
 }
 
 mod system_time_millis {
@@ -114,5 +234,77 @@ mod tests {
         let s = serde_json::to_string(&a).expect("ser");
         let back: BleAnomaly = serde_json::from_str(&s).expect("de");
         assert_eq!(a, back);
+    }
+}
+
+#[cfg(test)]
+mod presence_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn ad(id: &str) -> BleAdvertisement {
+        BleAdvertisement {
+            peripheral_id: PeripheralId::new(id),
+            address_type: None,
+            rssi: -50,
+            local_name: None,
+            manufacturer_data: BTreeMap::new(),
+            service_uuids: vec![],
+            tx_power: None,
+            timestamp: SystemTime::UNIX_EPOCH,
+        }
+    }
+
+    #[test]
+    fn first_sight_emits_arrived_once() {
+        let mut t = AnomalyTracker::new();
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+        let first = t.observe_at(&ad("p1"), now);
+        assert!(matches!(
+            first.first(),
+            Some(BleAnomaly::DevicePresence {
+                state: PresenceState::Arrived,
+                ..
+            })
+        ));
+        let second = t.observe_at(&ad("p1"), now + Duration::from_secs(1));
+        assert!(
+            second.is_empty(),
+            "second observation should not re-fire arrived, got {second:?}"
+        );
+    }
+
+    #[test]
+    fn departed_fires_when_unseen_past_threshold() {
+        let mut t = AnomalyTracker::new();
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+        drop(t.observe_at(&ad("p1"), now));
+        let later = now + DEPARTED_AFTER + Duration::from_secs(1);
+        let dep = t.tick_at(later);
+        assert_eq!(dep.len(), 1);
+        assert!(matches!(
+            dep.first(),
+            Some(BleAnomaly::DevicePresence {
+                state: PresenceState::Departed,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn re_arrival_after_departed_emits_arrived_again() {
+        let mut t = AnomalyTracker::new();
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+        drop(t.observe_at(&ad("p1"), t0));
+        drop(t.tick_at(t0 + DEPARTED_AFTER + Duration::from_secs(1)));
+        let t2 = t0 + DEPARTED_AFTER + Duration::from_secs(65);
+        let again = t.observe_at(&ad("p1"), t2);
+        assert!(matches!(
+            again.first(),
+            Some(BleAnomaly::DevicePresence {
+                state: PresenceState::Arrived,
+                ..
+            })
+        ));
     }
 }
