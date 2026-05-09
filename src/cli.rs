@@ -243,7 +243,7 @@ pub enum Cmd {
         table: Option<std::path::PathBuf>,
 
         /// Built-in service template. Requires --name and --ip. mDNS-only.
-        #[arg(long, value_enum, requires = "name", requires_all = ["name", "ip"], conflicts_with = "ssdp")]
+        #[arg(long, value_enum, requires = "name", requires_all = ["name", "ip"], conflicts_with_all = ["ssdp", "llmnr"])]
         template: Option<Template>,
 
         /// Instance name for the template (e.g. "Conf Room"). mDNS-only.
@@ -254,7 +254,7 @@ pub enum Cmd {
         #[arg(long, requires = "template")]
         ip: Option<Ipv4Addr>,
 
-        #[arg(long, default_value_t = 3, conflicts_with = "ssdp")]
+        #[arg(long, default_value_t = 3, conflicts_with_all = ["ssdp", "llmnr"])]
         burst: u8,
 
         #[arg(long = "allow", value_name = "CIDR")]
@@ -264,11 +264,11 @@ pub enum Cmd {
         allow_instance: Vec<String>,
 
         /// Bridge inbound TCP on spoofed ports to HOST:PORT (full MITM). mDNS-only.
-        #[arg(long, value_name = "HOST:PORT", conflicts_with = "ssdp")]
+        #[arg(long, value_name = "HOST:PORT", conflicts_with_all = ["ssdp", "llmnr"])]
         relay: Option<SocketAddr>,
 
         /// Where spoof answers are sent. mDNS-only.
-        #[arg(long, value_enum, default_value_t = ReplyMode::Multicast, conflicts_with = "ssdp")]
+        #[arg(long, value_enum, default_value_t = ReplyMode::Multicast, conflicts_with_all = ["ssdp", "llmnr"])]
         reply: ReplyMode,
 
         /// Periodically push our spoofed records into client caches.
@@ -277,7 +277,7 @@ pub enum Cmd {
         reannounce_interval: u64,
 
         /// Passive dry-run: report matching queries and conflicts without answering. mDNS-only.
-        #[arg(long, conflicts_with = "ssdp")]
+        #[arg(long, conflicts_with_all = ["ssdp", "llmnr"])]
         monitor: bool,
 
         /// Window in seconds. 0 = until Ctrl-C.
@@ -286,13 +286,22 @@ pub enum Cmd {
 
         /// Run as an `SSDP` / `UPnP` responder instead of `mDNS`. Interprets `TABLE`
         /// as an SSDP TOML schema (see docs).
-        #[arg(long)]
+        #[arg(long, conflicts_with = "llmnr")]
         ssdp: bool,
 
         /// LOCATION URL host (advertised IPv4) for SSDP responses. Defaults to the
         /// first non-loopback interface IP. SSDP-only.
         #[arg(long, value_name = "IP", requires = "ssdp")]
         http_host: Option<Ipv4Addr>,
+
+        /// Run an LLMNR responder (UDP 5355) instead of mDNS or SSDP.
+        #[arg(long, conflicts_with_all = ["ssdp", "template", "burst", "relay", "reply", "monitor"])]
+        llmnr: bool,
+
+        /// LLMNR-only: answer all queries in the table without an allow-list check.
+        /// Mutually exclusive with --allow / --allow-instance which are allow-list semantics.
+        #[arg(long, requires = "llmnr", conflicts_with_all = ["allow", "allow_instance"])]
+        wildcard: bool,
     },
 
     /// Capture a real LAN device and emit a TOML answer table mimicking it.
@@ -609,8 +618,15 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             timeout,
             ssdp,
             http_host,
+            llmnr,
+            wildcard,
         } => {
-            if ssdp {
+            if llmnr {
+                let table_path =
+                    table.context("--llmnr spoof requires a TABLE positional argument")?;
+                run_llmnr_spoof(&table_path, allow, allow_instance, wildcard, timeout, scope)
+                    .await?;
+            } else if ssdp {
                 let table_path =
                     table.context("--ssdp spoof requires a TABLE positional argument")?;
                 run_ssdp_spoof(
@@ -1305,6 +1321,67 @@ async fn run_ssdp_spoof(
                 Ok(Err(e)) => Err(e.into()),
             }
         }
+    }
+}
+
+#[allow(
+    clippy::similar_names,
+    reason = "names match CLI flag spelling: allow vs allow_instance"
+)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "all args map 1:1 to CLI flags; splitting into a struct would obscure the relationship"
+)]
+async fn run_llmnr_spoof(
+    table_path: &std::path::Path,
+    allow_subnet: Vec<IpNet>,
+    allow_instance: Vec<String>,
+    wildcard: bool,
+    timeout: u64,
+    scope: Option<crate::scope::Scope>,
+) -> anyhow::Result<()> {
+    let raw = std::fs::read_to_string(table_path)
+        .with_context(|| format!("reading LLMNR answer table {}", table_path.display()))?;
+    let table =
+        crate::name_res::table::AnswerTable::from_toml(&raw).map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    let mut auth = match scope {
+        Some(s) => s.into_auth(allow_subnet, Vec::new()),
+        None => allow_subnet
+            .into_iter()
+            .fold(Authorization::new(), Authorization::allow_subnet),
+    };
+    for name in allow_instance {
+        auth = auth.allow_name(name);
+    }
+    if !wildcard {
+        auth.warn_once_if_permissive("spoof_llmnr");
+    }
+
+    let responder = crate::name_res::llmnr::Responder::new(
+        crate::name_res::llmnr::llmnr_mode(),
+        table,
+        auth,
+        wildcard,
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let task = tokio::spawn({
+        let cancel = cancel.clone();
+        async move { responder.run(cancel).await }
+    });
+
+    let outcome = tokio::select! {
+        biased;
+        r = task => Some(r),
+        () = wait_for_window(timeout) => None,
+    };
+    cancel.cancel();
+    match outcome {
+        Some(Ok(Err(e))) => Err(anyhow::anyhow!("{e}")),
+        Some(Err(e)) => Err(anyhow::anyhow!("llmnr responder task panicked: {e}")),
+        Some(Ok(Ok(()))) | None => Ok(()),
     }
 }
 
