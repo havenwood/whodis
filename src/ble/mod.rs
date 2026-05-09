@@ -8,6 +8,9 @@ pub mod continuity;
 pub mod fingerprint;
 pub mod probe;
 pub mod scan;
+pub mod service_uuids;
 pub mod types;
 
-pub use types::{AddressType, AirDropMode, BleAdvertisement, BleDevice, DeviceClass, PeripheralId};
+pub use types::{
+    AddressType, AirDropMode, BleAdvertisement, BleDevice, DeviceClass, PeripheralId, RssiSample,
+};
