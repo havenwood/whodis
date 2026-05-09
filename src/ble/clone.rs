@@ -250,6 +250,145 @@ fn merge_ads(target: &PeripheralId, ads: &[BleAdvertisement]) -> BleCloneAdverti
     out
 }
 
+/// GATT enrichment options. Defaults: 5s connect, 5s discover.
+#[derive(Debug, Clone, Copy)]
+pub struct GattOptions {
+    pub connect_timeout: Duration,
+    pub discover_timeout: Duration,
+}
+
+impl Default for GattOptions {
+    fn default() -> Self {
+        Self {
+            connect_timeout: Duration::from_secs(5),
+            discover_timeout: Duration::from_secs(5),
+        }
+    }
+}
+
+/// Connect to the peripheral, discover services, read every readable characteristic.
+///
+/// Errors are collected into `gatt.errors`; the clone is mutated in place. Returns `Ok(())`
+/// even on per-step failures so the caller still gets a partial clone.
+pub async fn enrich_with_gatt(
+    clone: &mut BleClone,
+    central: &btleplug::platform::Adapter,
+    opts: GattOptions,
+) -> Result<()> {
+    use btleplug::api::{Central, CharPropFlags, Peripheral as _};
+
+    let mut gatt = BleCloneGatt::default();
+    let target_id = clone.advertisement.peripheral_id.clone();
+
+    let peripherals = central.peripherals().await.map_err(|e| Error::BleScan {
+        reason: format!("listing peripherals: {e}"),
+    })?;
+    let peripheral = peripherals
+        .into_iter()
+        .find(|p| PeripheralId::new(p.id().to_string().as_str()) == target_id);
+
+    let Some(p) = peripheral else {
+        gatt.errors
+            .push(format!("peripheral {target_id} not found in adapter cache"));
+        clone.gatt = Some(gatt);
+        return Ok(());
+    };
+
+    if let Err(e) = p.connect_with_timeout(opts.connect_timeout).await {
+        gatt.errors.push(format!("connect: {e}"));
+        clone.gatt = Some(gatt);
+        return Ok(());
+    }
+
+    if let Err(e) = p
+        .discover_services_with_timeout(opts.discover_timeout)
+        .await
+    {
+        gatt.errors.push(format!("discover_services: {e}"));
+        drop(p.disconnect().await);
+        clone.gatt = Some(gatt);
+        return Ok(());
+    }
+
+    for service in p.services() {
+        let mut svc = BleCloneService {
+            uuid: service.uuid,
+            characteristics: Vec::new(),
+        };
+        for c in &service.characteristics {
+            let props = format_props(c.properties);
+            let last_value = if c.properties.contains(CharPropFlags::READ) {
+                match p.read(c).await {
+                    Ok(bytes) => Some(hex_blob(&bytes)),
+                    Err(e) => {
+                        gatt.errors.push(format!("read {}: {e}", c.uuid));
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            svc.characteristics.push(BleCloneCharacteristic {
+                uuid: c.uuid,
+                properties: props,
+                last_value,
+            });
+        }
+        gatt.services.push(svc);
+    }
+
+    drop(p.disconnect().await);
+    clone.gatt = Some(gatt);
+    Ok(())
+}
+
+fn format_props(flags: btleplug::api::CharPropFlags) -> Vec<String> {
+    use btleplug::api::CharPropFlags;
+    let mut out = Vec::new();
+    let pairs = [
+        (CharPropFlags::BROADCAST, "broadcast"),
+        (CharPropFlags::READ, "read"),
+        (
+            CharPropFlags::WRITE_WITHOUT_RESPONSE,
+            "write_without_response",
+        ),
+        (CharPropFlags::WRITE, "write"),
+        (CharPropFlags::NOTIFY, "notify"),
+        (CharPropFlags::INDICATE, "indicate"),
+        (
+            CharPropFlags::AUTHENTICATED_SIGNED_WRITES,
+            "auth_signed_write",
+        ),
+        (CharPropFlags::EXTENDED_PROPERTIES, "extended_properties"),
+    ];
+    for (flag, name) in pairs {
+        if flags.contains(flag) {
+            out.push(name.to_string());
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod gatt_helper_tests {
+    use super::*;
+
+    #[test]
+    fn format_props_emits_canonical_names() {
+        use btleplug::api::CharPropFlags;
+        let f = CharPropFlags::READ | CharPropFlags::NOTIFY;
+        let names = format_props(f);
+        assert_eq!(names, vec!["read".to_string(), "notify".to_string()]);
+    }
+
+    #[test]
+    fn format_props_empty_when_no_flags() {
+        use btleplug::api::CharPropFlags;
+        let names = format_props(CharPropFlags::empty());
+        assert!(names.is_empty(), "got {names:?}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
