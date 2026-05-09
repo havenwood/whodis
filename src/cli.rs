@@ -378,6 +378,17 @@ pub enum Cmd {
         /// in the emitted TOML.
         #[arg(long)]
         ssdp: bool,
+
+        /// Capture a BLE peripheral's advertising profile (and optionally GATT)
+        /// instead of an mDNS instance. The `<INSTANCE>` argument is the
+        /// `PeripheralId` from `whodis browse --ble`.
+        #[arg(long, conflicts_with = "ssdp")]
+        ble: bool,
+
+        /// BLE-only: also connect and enumerate the GATT service map. Off
+        /// by default — connecting wakes the peripheral and is briefly visible.
+        #[arg(long, requires = "ble")]
+        gatt: bool,
     },
 
     /// Send goodbye or conflict-rename floods. Disruptive.
@@ -783,12 +794,22 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             instance,
             timeout,
             ssdp,
+            ble,
+            gatt,
         } => {
-            let dur = std::time::Duration::from_secs(timeout);
-            if ssdp {
+            if ble {
+                let dur = if timeout == 5 {
+                    std::time::Duration::from_secs(10)
+                } else {
+                    std::time::Duration::from_secs(timeout)
+                };
+                run_ble_clone(&instance, dur, gatt).await?;
+            } else if ssdp {
+                let dur = std::time::Duration::from_secs(timeout);
                 let cloned = crate::ssdp::clone_device(&instance, dur).await?;
                 crate::output::emit_raw(&cloned.to_toml())?;
             } else {
+                let dur = std::time::Duration::from_secs(timeout);
                 let cloned = crate::clone::clone_instance(&instance, dur).await?;
                 crate::output::emit_raw(&cloned.to_toml())?;
             }
@@ -1422,6 +1443,34 @@ fn ble_anomaly_peripheral_id(a: &crate::ble::BleAnomaly) -> Option<&crate::ble::
         | BleAnomaly::DeviceClassClassification { peripheral_id, .. } => Some(peripheral_id),
         BleAnomaly::UnknownContinuityType { .. } => None,
     }
+}
+
+async fn run_ble_clone(
+    instance: &str,
+    duration: std::time::Duration,
+    gatt: bool,
+) -> anyhow::Result<()> {
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let target = crate::ble::PeripheralId::new(instance);
+
+    let source = crate::ble::scan::BtleplugSource::new()
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let adapter = source.adapter();
+    let mut clone =
+        crate::ble::clone::clone_peripheral_from_source(target, Box::new(source), duration, cancel)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    if gatt {
+        let opts = crate::ble::clone::GattOptions::default();
+        crate::ble::clone::enrich_with_gatt(&mut clone, &adapter, opts)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+    }
+
+    crate::output::emit_raw(&clone.to_toml())?;
+    Ok(())
 }
 
 #[derive(Debug, Serialize)]
