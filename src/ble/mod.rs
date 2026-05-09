@@ -9,3 +9,5 @@ pub mod fingerprint;
 pub mod probe;
 pub mod scan;
 pub mod types;
+
+pub use types::{AddressType, AirDropMode, BleAdvertisement, BleDevice, DeviceClass, PeripheralId};
