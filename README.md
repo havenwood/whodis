@@ -254,6 +254,8 @@ whodis probe  --ble <PERIPHERAL_ID>
 whodis probe  --ble <PERIPHERAL_ID> --duration 60
 whodis sentinel --ble
 whodis sentinel --ble --include-known
+whodis clone    --ble <PERIPHERAL_ID>
+whodis clone    --ble <PERIPHERAL_ID> --gatt
 ```
 
 `<PERIPHERAL_ID>` comes from `browse --ble` output. macOS uses CoreBluetooth UUIDs (it never exposes hardware MACs).
@@ -261,6 +263,8 @@ whodis sentinel --ble --include-known
 First run prompts for Bluetooth access in System Settings > Privacy & Security > Bluetooth.
 
 Scope: `allow_ble_ids`, `allow_ble_vendors`, `known_ble_ids` (your own devices, suppressed unless `--include-known`).
+
+`clone --ble` emits a TOML profile of the peripheral's advertising data (and optionally its GATT services). Replay the TOML from an external BLE radio (BlueZ, nRF) — macOS does not expose the manufacturer-data slot to third-party advertisers.
 
 ## Clone
 
