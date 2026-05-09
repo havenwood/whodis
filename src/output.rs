@@ -596,6 +596,44 @@ fn continuity_kind_name(p: &crate::ble::continuity::ContinuityPayload) -> &'stat
     }
 }
 
+#[allow(dead_code, reason = "consumed by Cmd::Watch BLE dispatch in Task 7")]
+pub(crate) fn emit_ble_anomaly(
+    renderer: Renderer,
+    anomaly: &crate::ble::BleAnomaly,
+) -> io::Result<()> {
+    match renderer {
+        Renderer::Jsonl => emit_jsonl(anomaly),
+        Renderer::Pretty(_) => emit_ble_anomaly_pretty(anomaly),
+    }
+}
+
+fn emit_ble_anomaly_pretty(anomaly: &crate::ble::BleAnomaly) -> io::Result<()> {
+    use crate::ble::BleAnomaly;
+    let line = match anomaly {
+        BleAnomaly::DevicePresence {
+            peripheral_id,
+            state,
+            ..
+        } => format!("{peripheral_id}  presence={state:?}\n"),
+        BleAnomaly::AirDropEveryoneMode { peripheral_id, .. } => {
+            format!("{peripheral_id}  airdrop=everyone\n")
+        }
+        BleAnomaly::LockStateChange {
+            peripheral_id,
+            prev,
+            curr,
+        } => format!("{peripheral_id}  lock={prev:?}->{curr:?}\n"),
+        BleAnomaly::DeviceClassClassification {
+            peripheral_id,
+            device_class,
+        } => format!("{peripheral_id}  class={device_class:?}\n"),
+        BleAnomaly::UnknownContinuityType { ty, count } => {
+            format!("unknown_continuity_type={ty:#04x} count={count}\n")
+        }
+    };
+    emit_raw(&line)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
