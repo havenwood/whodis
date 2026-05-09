@@ -31,6 +31,7 @@ pub mod browse;
 pub mod detect;
 pub mod fingerprint;
 pub mod flood;
+pub mod name_res;
 pub mod probe;
 pub mod spoof;
 pub mod ssdp;
