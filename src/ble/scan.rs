@@ -107,6 +107,14 @@ impl BtleplugSource {
         };
         Ok(Self { adapter })
     }
+
+    /// Returns a cloned handle to the underlying adapter. Use this when you
+    /// need a `Central` handle for additional operations (e.g. connecting
+    /// to a peripheral) after the source has been consumed by `Scanner::run`.
+    #[must_use]
+    pub fn adapter(&self) -> Adapter {
+        self.adapter.clone()
+    }
 }
 
 impl BleEventSource for BtleplugSource {
