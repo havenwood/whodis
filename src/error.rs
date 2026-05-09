@@ -28,6 +28,9 @@ pub enum Error {
         timeout: std::time::Duration,
     },
 
+    #[error("name resolution protocol error: {reason}")]
+    NameRes { reason: String },
+
     #[error("spoof verify failed: {reason}")]
     SpoofVerify { reason: String },
 }
