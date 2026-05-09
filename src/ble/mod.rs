@@ -15,6 +15,7 @@ pub mod watch;
 
 pub use clone::{
     BleClone, BleCloneAdvertisement, BleCloneCharacteristic, BleCloneGatt, BleCloneService,
+    clone_peripheral_from_source,
 };
 pub use types::{
     AddressType, AirDropMode, BleAdvertisement, BleDevice, DeviceClass, PeripheralId, RssiSample,
