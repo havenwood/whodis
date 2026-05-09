@@ -114,7 +114,7 @@ pub async fn clone_instance(instance_fqdn: &str, timeout: Duration) -> Result<Cl
     // mDNS group and unicast responses the target sends back to port 5353.
     let transport = Transport::build(Mode::Listen)?;
 
-    // Phase 1: send PTR for service + SRV/TXT for the specific instance.
+    // Round 1: send PTR for service + SRV/TXT for the specific instance.
     let mut q1 = Message::new(0, MessageType::Query, OpCode::Query);
     q1.set_message_type(MessageType::Query)
         .set_op_code(OpCode::Query)
@@ -124,19 +124,18 @@ pub async fn clone_instance(instance_fqdn: &str, timeout: Duration) -> Result<Cl
     push_query(&mut q1, instance_fqdn, RecordType::TXT)?;
 
     let half = timeout / 2;
-    let phase1 = collect_records(&transport, &q1, half).await?;
+    let round1 = collect_records(&transport, &q1, half).await?;
 
-    // Build partial ClonedInstance from phase 1.
     let mut out = ClonedInstance {
         instance_fqdn: instance_fqdn.trim_end_matches('.').to_string() + ".",
         service_fqdn: parsed.service_fqdn.trim_end_matches('.').to_string() + ".",
         ..Default::default()
     };
-    for r in &phase1 {
+    for r in &round1 {
         absorb_record(&mut out, r, instance_fqdn);
     }
 
-    // Phase 2: if we learned a host from SRV, query A/AAAA for it.
+    // Round 2: if we learned a host from SRV, query A/AAAA for it.
     if let Some(host) = out.host.clone() {
         let mut q2 = Message::new(0, MessageType::Query, OpCode::Query);
         q2.set_message_type(MessageType::Query)
@@ -144,8 +143,8 @@ pub async fn clone_instance(instance_fqdn: &str, timeout: Duration) -> Result<Cl
             .set_recursion_desired(false);
         push_query(&mut q2, &host, RecordType::A)?;
         push_query(&mut q2, &host, RecordType::AAAA)?;
-        let phase2 = collect_records(&transport, &q2, half).await?;
-        for r in phase2 {
+        let round2 = collect_records(&transport, &q2, half).await?;
+        for r in round2 {
             absorb_record(&mut out, &r, instance_fqdn);
         }
     }

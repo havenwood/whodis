@@ -27,7 +27,6 @@ pub async fn write(out_path: &Path, window_secs: u64) -> Result<usize> {
     };
     let started = SystemTime::now();
 
-    // Phase 1: discover service types (count by type).
     let opts = ProbeOptions {
         timeout: Duration::from_secs(secs / 2 + 1),
     };
@@ -39,10 +38,8 @@ pub async fn write(out_path: &Path, window_secs: u64) -> Result<usize> {
         }
     };
 
-    // Phase 2: snapshot instances.
     let instances = collect_instances(secs).await;
 
-    // Phase 3: compose the Markdown.
     let bytes = build_markdown(
         started,
         secs,
@@ -51,7 +48,6 @@ pub async fn write(out_path: &Path, window_secs: u64) -> Result<usize> {
         service_type_error.as_deref(),
     );
 
-    // Phase 4: write atomically (or as close as we can).
     let file = std::fs::File::create(out_path)?;
     let mut w = BufWriter::new(file);
     w.write_all(bytes.as_bytes())?;
