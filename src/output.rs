@@ -493,7 +493,6 @@ fn emit_sweep_pretty(color: ColorMode, results: &[SweepResult]) -> io::Result<()
     Ok(())
 }
 
-#[allow(dead_code, reason = "used by Task 10 CLI dispatch")]
 pub(crate) fn emit_ble_advertisement(renderer: Renderer, ad: &BleAdvertisement) -> io::Result<()> {
     match renderer {
         Renderer::Jsonl => emit_jsonl(ad),
@@ -504,7 +503,6 @@ pub(crate) fn emit_ble_advertisement(renderer: Renderer, ad: &BleAdvertisement) 
     }
 }
 
-#[allow(dead_code, reason = "used by Task 10 CLI dispatch")]
 pub(crate) fn emit_ble_device(renderer: Renderer, device: &BleDevice) -> io::Result<()> {
     match renderer {
         Renderer::Jsonl => emit_jsonl(device),
