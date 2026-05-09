@@ -68,13 +68,11 @@ impl BleAnomaly {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum BleAnomalyKey {
     Presence(PeripheralId, PresenceState),
-    #[allow(dead_code, reason = "consumed by Tasks 3-4")]
     AirDropEveryone(PeripheralId),
     #[allow(dead_code, reason = "consumed by Task 4")]
     LockChange(PeripheralId),
-    #[allow(dead_code, reason = "consumed by Task 3")]
+    #[allow(dead_code, reason = "consumed by Task 4")]
     Classification(PeripheralId),
-    #[allow(dead_code, reason = "consumed by Task 3")]
     UnknownContinuityType(u8),
 }
 
@@ -86,6 +84,9 @@ use crate::ble::BleAdvertisement;
 /// Threshold after which a peripheral is considered Departed.
 #[allow(clippy::duration_suboptimal_units, reason = "from_mins not available")]
 const DEPARTED_AFTER: Duration = Duration::from_secs(600);
+
+/// Threshold for unknown Continuity type observations before emitting anomaly.
+const UNKNOWN_TY_THRESHOLD: usize = 5;
 
 #[derive(Debug, Clone)]
 struct PeripheralState {
@@ -156,6 +157,40 @@ impl AnomalyTracker {
                 classification: None,
             });
         entry.last_seen = now;
+
+        // Continuity decode: AirDrop-Everyone and Unknown-type accounting.
+        if let Some(apple) = ad.manufacturer_data.get(&0x004C) {
+            for payload in crate::ble::continuity::decode(apple) {
+                match payload {
+                    crate::ble::continuity::ContinuityPayload::AirDropPair {
+                        mode: crate::ble::AirDropMode::Everyone,
+                        ..
+                    } => {
+                        let key = BleAnomalyKey::AirDropEveryone(ad.peripheral_id.clone());
+                        if self.reported.insert(key) {
+                            out.push(BleAnomaly::AirDropEveryoneMode {
+                                peripheral_id: ad.peripheral_id.clone(),
+                                observed_at: now,
+                            });
+                        }
+                    }
+                    crate::ble::continuity::ContinuityPayload::Unknown { ty, .. } => {
+                        let count = self
+                            .unknown_ty_counts
+                            .entry(ty)
+                            .and_modify(|c| *c += 1)
+                            .or_insert(1);
+                        if *count >= UNKNOWN_TY_THRESHOLD {
+                            let key = BleAnomalyKey::UnknownContinuityType(ty);
+                            if self.reported.insert(key) {
+                                out.push(BleAnomaly::UnknownContinuityType { ty, count: *count });
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
 
         out
     }
@@ -306,5 +341,80 @@ mod presence_tests {
                 ..
             })
         ));
+    }
+}
+
+#[cfg(test)]
+mod continuity_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn ad_with_apple(id: &str, apple: Vec<u8>) -> BleAdvertisement {
+        let mut mfr = BTreeMap::new();
+        mfr.insert(0x004C, apple);
+        BleAdvertisement {
+            peripheral_id: PeripheralId::new(id),
+            address_type: None,
+            rssi: -50,
+            local_name: None,
+            manufacturer_data: mfr,
+            service_uuids: vec![],
+            tx_power: None,
+            timestamp: SystemTime::UNIX_EPOCH,
+        }
+    }
+
+    #[test]
+    fn airdrop_everyone_fires_once_per_peripheral() {
+        // AirDrop type 0x05, length 0x12, first byte 0x02 = Everyone bit set
+        let mut payload = vec![0x05, 0x12, 0x02];
+        payload.extend_from_slice(&[0u8; 17]);
+        let ad = ad_with_apple("p1", payload);
+
+        let mut t = AnomalyTracker::new();
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+        let first = t.observe_at(&ad, now);
+        assert!(
+            first
+                .iter()
+                .any(|a| matches!(a, BleAnomaly::AirDropEveryoneMode { .. })),
+            "expected AirDropEveryoneMode, got {first:?}"
+        );
+
+        let second = t.observe_at(&ad, now + Duration::from_secs(1));
+        assert!(
+            !second
+                .iter()
+                .any(|a| matches!(a, BleAnomaly::AirDropEveryoneMode { .. })),
+            "expected dedup, got {second:?}"
+        );
+    }
+
+    #[test]
+    fn unknown_continuity_type_fires_once_after_five_observations() {
+        // Unknown type 0xAB, length 0x02, payload 0xCC 0xDD
+        let payload = vec![0xAB, 0x02, 0xCC, 0xDD];
+        let mut t = AnomalyTracker::new();
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+        for i in 0..4 {
+            let id = format!("p{i}");
+            let ad = ad_with_apple(&id, payload.clone());
+            let out = t.observe_at(&ad, now + Duration::from_secs(i as u64));
+            assert!(
+                !out.iter()
+                    .any(|a| matches!(a, BleAnomaly::UnknownContinuityType { .. })),
+                "should not fire before threshold, iter {i}, got {out:?}"
+            );
+        }
+        let id = "p5".to_string();
+        let ad = ad_with_apple(&id, payload);
+        let fifth = t.observe_at(&ad, now + Duration::from_secs(5));
+        let unknown = fifth
+            .iter()
+            .find(|a| matches!(a, BleAnomaly::UnknownContinuityType { .. }));
+        assert!(
+            unknown.is_some(),
+            "expected UnknownContinuityType after threshold, got {fifth:?}"
+        );
     }
 }
