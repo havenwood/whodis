@@ -5,11 +5,16 @@
 //! observations with a clock, get back a `Vec<BleAnomaly>`. Dedup is
 //! permanent within a session via `HashSet<BleAnomalyKey>`.
 
-use std::time::SystemTime;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
+use tokio_stream::StreamExt as _;
+use tokio_util::sync::CancellationToken;
 
+use crate::ble::scan::BleEventSource;
 use crate::ble::{DeviceClass, PeripheralId};
+use crate::error::Result;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -75,7 +80,6 @@ pub(crate) enum BleAnomalyKey {
 }
 
 use std::collections::{HashMap, HashSet};
-use std::time::Duration;
 
 use crate::ble::BleAdvertisement;
 
@@ -295,6 +299,73 @@ impl AnomalyTracker {
             }
         }
         out
+    }
+}
+
+type AnomalyCallback = Arc<dyn Fn(BleAnomaly) + Send + Sync>;
+
+/// Drains a [`BleEventSource`] and feeds its [`AnomalyTracker`]. Calls
+/// `on_anomaly` for each emitted anomaly. Periodically runs `tick_at`
+/// to surface `Departed` presence anomalies.
+pub struct Watcher {
+    source: Box<dyn BleEventSource>,
+    on_anomaly: Option<AnomalyCallback>,
+    tracker: AnomalyTracker,
+}
+
+impl Watcher {
+    #[must_use]
+    pub fn new<S: BleEventSource>(source: S) -> Self {
+        Self {
+            source: Box::new(source),
+            on_anomaly: None,
+            tracker: AnomalyTracker::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn new_boxed(source: Box<dyn BleEventSource>) -> Self {
+        Self {
+            source,
+            on_anomaly: None,
+            tracker: AnomalyTracker::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn on_anomaly(mut self, cb: impl Fn(BleAnomaly) + Send + Sync + 'static) -> Self {
+        self.on_anomaly = Some(Arc::new(cb));
+        self
+    }
+
+    pub async fn run(self, cancel: CancellationToken) -> Result<()> {
+        let mut stream = self.source.stream();
+        let mut tracker = self.tracker;
+        let cb = self.on_anomaly;
+        let mut tick = tokio::time::interval(Duration::from_secs(30));
+        tick.tick().await; // drop the immediate first tick
+        loop {
+            tokio::select! {
+                () = cancel.cancelled() => return Ok(()),
+                _ = tick.tick() => {
+                    for a in tracker.tick_at(SystemTime::now()) {
+                        if let Some(cb) = cb.as_ref() {
+                            cb(a);
+                        }
+                    }
+                }
+                next = stream.next() => match next {
+                    None => return Ok(()),
+                    Some(ad) => {
+                        for a in tracker.observe(&ad) {
+                            if let Some(cb) = cb.as_ref() {
+                                cb(a);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
