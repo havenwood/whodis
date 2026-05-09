@@ -97,6 +97,110 @@ fn rand_id() -> u16 {
     SEED.fetch_add(1, Ordering::Relaxed)
 }
 
+use crate::auth::Authorization;
+use crate::name_res::table::AnswerTable;
+use crate::transport::{Destination, Transport};
+
+pub struct Responder {
+    transport: Transport,
+    table: AnswerTable,
+    auth: Authorization,
+    wildcard: bool,
+}
+
+impl Responder {
+    pub fn new(
+        mode: crate::mode::Mode,
+        table: AnswerTable,
+        auth: Authorization,
+        wildcard: bool,
+    ) -> Result<Self> {
+        let transport = Transport::build(mode)?;
+        Ok(Self {
+            transport,
+            table,
+            auth,
+            wildcard,
+        })
+    }
+
+    pub async fn run(self, cancel: tokio_util::sync::CancellationToken) -> Result<()> {
+        let mut buf = vec![0u8; 4096];
+        loop {
+            let v4 = self.transport.v4();
+            let v6 = self.transport.v6();
+            tokio::select! {
+                () = cancel.cancelled() => return Ok(()),
+                r = crate::transport::recv_one(v4.as_ref(), v6.as_ref(), &mut buf) => {
+                    match r {
+                        Err(e) => {
+                            tracing::debug!(error = %e, "llmnr responder recv error, continuing");
+                        }
+                        Ok(None) => return Ok(()),
+                        Ok(Some((n, src))) => {
+                            if let Some(slice) = buf.get(..n)
+                                && let Err(e) = self.handle(slice, src).await
+                            {
+                                tracing::debug!(error = %e, "llmnr responder handle error, continuing");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    async fn handle(&self, bytes: &[u8], src: std::net::SocketAddr) -> Result<()> {
+        use hickory_proto::op::{Message, MessageType, ResponseCode};
+        use hickory_proto::rr::{RData, Record, RecordType, rdata};
+        use hickory_proto::serialize::binary::BinEncodable;
+
+        let q = Message::from_vec(bytes).map_err(|e| Error::NameRes {
+            reason: e.to_string(),
+        })?;
+        if q.metadata.message_type != MessageType::Query {
+            return Ok(());
+        }
+        let Some(query) = q.queries.first() else {
+            return Ok(());
+        };
+        let qname_full = query.name().to_ascii();
+        let qname = qname_full.trim_end_matches('.').to_string();
+
+        if !self.wildcard && !self.auth.permits_name(&qname) {
+            tracing::debug!(name = %qname, "llmnr query outside allow-list, dropping");
+            return Ok(());
+        }
+
+        let Some(entry) = self.table.lookup(&qname) else {
+            return Ok(());
+        };
+
+        let rdata = match (entry.answer, query.query_type()) {
+            (std::net::IpAddr::V4(v4), RecordType::A) => RData::A(rdata::A(v4)),
+            (std::net::IpAddr::V6(v6), RecordType::AAAA) => RData::AAAA(rdata::AAAA(v6)),
+            _ => return Ok(()),
+        };
+
+        let mut resp = Message::new(q.metadata.id, MessageType::Response, q.metadata.op_code);
+        resp.metadata.response_code = ResponseCode::NoError;
+        resp.metadata.authoritative = true;
+        resp.queries.push(query.clone());
+        resp.answers
+            .push(Record::from_rdata(query.name().clone(), entry.ttl, rdata));
+
+        let bytes = resp.to_bytes().map_err(|e| Error::NameRes {
+            reason: e.to_string(),
+        })?;
+
+        // RFC 4795 §2.4: respond unicast to the query source.
+        self.transport
+            .send_query(&bytes, Destination::Unicast(src))
+            .await?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
