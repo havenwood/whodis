@@ -41,7 +41,8 @@ pub mod ssdp_table;
 
 pub use auth::Authorization;
 pub use ble::{
-    AddressType, AirDropMode, BleAdvertisement, BleDevice, DeviceClass, PeripheralId, RssiSample,
+    AddressType, AirDropMode, BleAdvertisement, BleAnomaly, BleDevice, DeviceClass, LockState,
+    PeripheralId, PresenceState, RssiSample,
 };
 pub use cli::{Cli, Cmd, FloodCmd, run};
 pub use error::{Error, Result};
