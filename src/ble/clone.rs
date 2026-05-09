@@ -158,6 +158,98 @@ fn hex_blob(bytes: &[u8]) -> String {
     out
 }
 
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use tokio_util::sync::CancellationToken;
+
+use crate::ble::scan::{BleEventSource, Scanner};
+use crate::ble::types::BleAdvertisement;
+use crate::error::{Error, Result};
+
+/// Run a scan over `source` for `duration`, collecting ads matching `target`.
+///
+/// Returns a `BleClone` with merged advertisement, or `Err(Error::NoRecords)` if no ads match.
+pub async fn clone_peripheral_from_source(
+    target: PeripheralId,
+    source: Box<dyn BleEventSource>,
+    duration: Duration,
+    cancel: CancellationToken,
+) -> Result<BleClone> {
+    let collected: Arc<Mutex<Vec<BleAdvertisement>>> = Arc::new(Mutex::new(Vec::new()));
+    let collected_for_cb = collected.clone();
+    let target_for_cb = target.clone();
+
+    let scan_cancel = CancellationToken::new();
+    let scan_cancel_for_run = scan_cancel.clone();
+    let scan_handle = tokio::spawn(async move {
+        let scanner = Scanner::new_boxed(source).on_event(move |ad| {
+            if ad.peripheral_id == target_for_cb
+                && let Ok(mut g) = collected_for_cb.lock()
+            {
+                g.push(ad);
+            }
+        });
+        scanner.run(scan_cancel_for_run).await
+    });
+
+    tokio::select! {
+        () = cancel.cancelled() => {}
+        () = tokio::time::sleep(duration) => {}
+    }
+    scan_cancel.cancel();
+    drop(tokio::time::timeout(Duration::from_millis(500), scan_handle).await);
+
+    let ads: Vec<BleAdvertisement> = {
+        let guard = collected.lock().map_err(|e| Error::BleScan {
+            reason: format!("collected mutex poisoned: {e}"),
+        })?;
+        guard.clone()
+    };
+    if ads.is_empty() {
+        return Err(Error::NoRecords {
+            target: target.as_str().to_string(),
+            timeout: duration,
+        });
+    }
+
+    Ok(BleClone {
+        advertisement: merge_ads(&target, &ads),
+        gatt: None,
+    })
+}
+
+fn merge_ads(target: &PeripheralId, ads: &[BleAdvertisement]) -> BleCloneAdvertisement {
+    let mut out = BleCloneAdvertisement {
+        peripheral_id: target.clone(),
+        local_name: None,
+        address_type: None,
+        tx_power: None,
+        service_uuids: Vec::new(),
+        manufacturer_data: BTreeMap::new(),
+    };
+    for ad in ads {
+        if out.local_name.is_none() {
+            out.local_name.clone_from(&ad.local_name);
+        }
+        if out.address_type.is_none() {
+            out.address_type = ad.address_type;
+        }
+        if out.tx_power.is_none() {
+            out.tx_power = ad.tx_power;
+        }
+        for u in &ad.service_uuids {
+            if !out.service_uuids.contains(u) {
+                out.service_uuids.push(*u);
+            }
+        }
+        for (cid, data) in &ad.manufacturer_data {
+            out.manufacturer_data.insert(*cid, data.clone());
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,5 +367,56 @@ mod tests {
             toml.contains(r#"message = "connect timed out after 5s""#),
             "{toml}"
         );
+    }
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use super::*;
+    use std::time::SystemTime;
+
+    fn ad(id: &str, name: Option<&str>, tx: Option<i8>) -> BleAdvertisement {
+        BleAdvertisement {
+            peripheral_id: PeripheralId::new(id),
+            address_type: None,
+            rssi: -50,
+            local_name: name.map(str::to_string),
+            manufacturer_data: BTreeMap::new(),
+            service_uuids: vec![],
+            tx_power: tx,
+            timestamp: SystemTime::UNIX_EPOCH,
+        }
+    }
+
+    #[test]
+    fn merge_takes_first_non_empty_local_name() {
+        let target = PeripheralId::new("p1");
+        let ads = vec![ad("p1", None, None), ad("p1", Some("iPhone"), None)];
+        let m = merge_ads(&target, &ads);
+        assert_eq!(m.local_name.as_deref(), Some("iPhone"));
+    }
+
+    #[test]
+    fn merge_unions_service_uuids_dedup() {
+        let target = PeripheralId::new("p1");
+        let u1 = Uuid::parse_str("0000180f-0000-1000-8000-00805f9b34fb").expect("uuid");
+        let u2 = Uuid::parse_str("0000180a-0000-1000-8000-00805f9b34fb").expect("uuid");
+        let mut a = ad("p1", None, None);
+        a.service_uuids = vec![u1];
+        let mut b = ad("p1", None, None);
+        b.service_uuids = vec![u1, u2];
+        let m = merge_ads(&target, &[a, b]);
+        assert_eq!(m.service_uuids, vec![u1, u2]);
+    }
+
+    #[test]
+    fn merge_manufacturer_data_last_write_wins_per_cid() {
+        let target = PeripheralId::new("p1");
+        let mut a = ad("p1", None, None);
+        a.manufacturer_data.insert(0x004C, vec![1, 2, 3]);
+        let mut b = ad("p1", None, None);
+        b.manufacturer_data.insert(0x004C, vec![4, 5, 6, 7]);
+        let m = merge_ads(&target, &[a, b]);
+        assert_eq!(m.manufacturer_data.get(&0x004C), Some(&vec![4, 5, 6, 7]));
     }
 }
