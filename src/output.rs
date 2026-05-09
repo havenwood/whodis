@@ -596,7 +596,6 @@ fn continuity_kind_name(p: &crate::ble::continuity::ContinuityPayload) -> &'stat
     }
 }
 
-#[allow(dead_code, reason = "consumed by Cmd::Watch BLE dispatch in Task 7")]
 pub(crate) fn emit_ble_anomaly(
     renderer: Renderer,
     anomaly: &crate::ble::BleAnomaly,

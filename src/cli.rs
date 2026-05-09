@@ -251,6 +251,17 @@ pub enum Cmd {
         /// Also listen on LLMNR (UDP 5355) for poison-responder anomalies.
         #[arg(long)]
         llmnr: bool,
+
+        /// Track BLE recon anomalies (presence, AirDrop-everyone, lock-state,
+        /// classification, unknown-continuity-type). Mutually exclusive with
+        /// `--llmnr` (different transport stacks).
+        #[arg(long, conflicts_with = "llmnr")]
+        ble: bool,
+
+        /// BLE-only: include peripherals listed in `scope.known_ble_ids` in
+        /// anomaly output. Default suppresses them.
+        #[arg(long = "include-known", requires = "ble")]
+        include_known: bool,
     },
 
     /// Capture mDNS traffic to a pcap file.
@@ -787,7 +798,15 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             timeout,
             include_local,
             llmnr,
-        } => run_watch(renderer, timeout, include_local, llmnr).await?,
+            ble,
+            include_known,
+        } => {
+            if ble {
+                run_ble_watch(renderer, scope.clone(), include_known, timeout).await?;
+            } else {
+                run_watch(renderer, timeout, include_local, llmnr).await?;
+            }
+        }
         Cmd::Capture { pcap, timeout } => {
             let pcap = resolve_capture_path(pcap, scope.as_ref());
             let count = crate::capture::run(&pcap, timeout).await?;
@@ -1340,6 +1359,69 @@ async fn run_watch(
     task.await
         .map_err(|e| anyhow::anyhow!("watch task failed: {e}"))??;
     Ok(())
+}
+
+async fn run_ble_watch(
+    renderer: Renderer,
+    scope: Option<crate::scope::Scope>,
+    include_known: bool,
+    timeout: u64,
+) -> anyhow::Result<()> {
+    let known_ids: std::collections::BTreeSet<String> = if include_known {
+        std::collections::BTreeSet::new()
+    } else {
+        scope
+            .as_ref()
+            .map(|s| s.known_ble_ids.iter().cloned().collect())
+            .unwrap_or_default()
+    };
+
+    let source = crate::ble::scan::BtleplugSource::new()
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    let watcher = crate::ble::watch::Watcher::new(source).on_anomaly(move |a| {
+        if let Some(id) = ble_anomaly_peripheral_id(&a)
+            && known_ids.contains(id.as_str())
+        {
+            return;
+        }
+        if let Err(e) = crate::output::emit_ble_anomaly(renderer, &a) {
+            tracing::error!(error = %e, "ble anomaly emit failed");
+        }
+    });
+
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let cancel_for_timeout = cancel.clone();
+    let cancel_for_run = cancel.clone();
+    if timeout > 0 {
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(timeout)).await;
+            cancel_for_timeout.cancel();
+        });
+    } else {
+        let cancel_for_signal = cancel.clone();
+        tokio::spawn(async move {
+            drop(tokio::signal::ctrl_c().await);
+            cancel_for_signal.cancel();
+        });
+    }
+    watcher
+        .run(cancel_for_run)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok(())
+}
+
+fn ble_anomaly_peripheral_id(a: &crate::ble::BleAnomaly) -> Option<&crate::ble::PeripheralId> {
+    use crate::ble::BleAnomaly;
+    match a {
+        BleAnomaly::DevicePresence { peripheral_id, .. }
+        | BleAnomaly::AirDropEveryoneMode { peripheral_id, .. }
+        | BleAnomaly::LockStateChange { peripheral_id, .. }
+        | BleAnomaly::DeviceClassClassification { peripheral_id, .. } => Some(peripheral_id),
+        BleAnomaly::UnknownContinuityType { .. } => None,
+    }
 }
 
 #[derive(Debug, Serialize)]
