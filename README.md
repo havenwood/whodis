@@ -135,6 +135,7 @@ Anomaly classes (each emits one JSONL record with `class`, `severity`, and class
 | `lock_state_change`          | NearbyInfo `wake_status` high bit toggles (best-effort lock hint) |
 | `device_class_classification`| BLE peripheral classified to a non-Unknown class for the first time |
 | `unknown_continuity_type`    | Unrecognized Apple Continuity TLV type observed 5+ times |
+| `proximity_change`           | BLE RSSI delta exceeds `--proximity-rssi DBM` between observations within 1 minute |
 
 Loopback traffic is excluded by default; pass `--include-local` to dogfood `sentinel` against `flood` / `spoof` running on the same host.
 
@@ -254,6 +255,7 @@ whodis probe  --ble <PERIPHERAL_ID>
 whodis probe  --ble <PERIPHERAL_ID> --duration 60
 whodis sentinel --ble
 whodis sentinel --ble --include-known
+whodis sentinel --ble --proximity-rssi 20    # surface 20+ dBm RSSI swings
 whodis clone    --ble <PERIPHERAL_ID>
 whodis clone    --ble <PERIPHERAL_ID> --gatt
 ```
