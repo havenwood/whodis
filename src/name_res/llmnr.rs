@@ -15,7 +15,7 @@ pub const LLMNR_GROUP_V4: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 252);
 pub const LLMNR_GROUP_V6: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 1, 3);
 
 #[must_use]
-pub fn llmnr_mode() -> Mode {
+pub const fn llmnr_mode() -> Mode {
     Mode::Custom {
         group_v4: LLMNR_GROUP_V4,
         group_v6: LLMNR_GROUP_V6,
