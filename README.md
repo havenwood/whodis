@@ -1,6 +1,6 @@
 # whodis
 
-LAN recon and spoof, in Rust. macOS first. Covers mDNS / Bonjour, SSDP / UPnP, and LLMNR, with passive anomaly detection (`watch`) and Net-NTLMv2 credential capture (`spoof --llmnr --preset wpad`).
+LAN recon and spoof, in Rust. macOS first. Covers mDNS / Bonjour, SSDP / UPnP, and LLMNR, with passive anomaly detection (`sentinel`) and Net-NTLMv2 credential capture (`spoof --llmnr --preset wpad`).
 
 ```
 whodis browse --fingerprint
@@ -28,7 +28,7 @@ cargo install --path .
 | `enum`    | Per-host service deep dive, or host list with no args |
 | `arp`     | Read ARP/NDP caches with OUI vendor lookup |
 | `sweep`   | Active ICMP host discovery, no root required |
-| `watch`   | Passive listener for spoof / poison anomalies (mDNS, optionally LLMNR) |
+| `sentinel`| Passive listener for spoof / poison anomalies (mDNS, optionally LLMNR) |
 | `capture` | Dump mDNS to a pcap file |
 | `spoof`   | Authoritative responder for mDNS, SSDP, or LLMNR; optional TCP relay or NTLMSSP credcap |
 | `clone`   | Capture a real instance to a TOML answer table |
@@ -104,16 +104,16 @@ With no CIDR, sweeps the /24 of the primary non-loopback IPv4 interface (or the 
 
 Default `--max 256` guards against file descriptor exhaustion (macOS default `ulimit -n` is 256). IPv4 only in v1. Output is one record per host (`ip`, `alive`, `rtt_ms`, `mac`, `vendor`, `interface`); dead hosts omitted unless `--show-dead`. `--scope FILE` applies `allow_subnet` to skip IPs outside the engagement range.
 
-## Watch
+## Sentinel
 
 Passive listener that flags suspicious LAN behavior without sending anything. Default scope is mDNS; `--llmnr` adds an LLMNR socket so the same process catches Windows-side poisoning too.
 
 ```
-whodis watch                    # mDNS only
-whodis watch --llmnr            # mDNS + LLMNR poison detection
-whodis watch --ble              # BLE recon (presence, AirDrop, lock-state, classification)
-whodis watch --llmnr --include-local   # observe own host's traffic too
-whodis watch -t 60              # 60s window, then exit
+whodis sentinel                    # mDNS only
+whodis sentinel --llmnr            # mDNS + LLMNR poison detection
+whodis sentinel --ble              # BLE recon (presence, AirDrop, lock-state, classification)
+whodis sentinel --llmnr --include-local   # observe own host's traffic too
+whodis sentinel -t 60              # 60s window, then exit
 ```
 
 Anomaly classes (each emits one JSONL record with `class`, `severity`, and class-specific fields):
@@ -136,7 +136,7 @@ Anomaly classes (each emits one JSONL record with `class`, `severity`, and class
 | `device_class_classification`| BLE peripheral classified to a non-Unknown class for the first time |
 | `unknown_continuity_type`    | Unrecognized Apple Continuity TLV type observed 5+ times |
 
-Loopback traffic is excluded by default; pass `--include-local` to dogfood `watch` against `flood` / `spoof` running on the same host.
+Loopback traffic is excluded by default; pass `--include-local` to dogfood `sentinel` against `flood` / `spoof` running on the same host.
 
 ## Capture
 
@@ -221,7 +221,7 @@ mDNS-only flags (`-T`, `-f`, `--template`, `--burst`, `--relay`, `--reply`, `--m
 
 ## LLMNR + WPAD credcap
 
-LLMNR (UDP/5355) is the Windows-side mDNS sibling. `whodis probe --llmnr <name>` resolves a name; `whodis spoof --llmnr <table.toml>` runs an authoritative responder with the same allow-list / scope / `whodis-scope.toml` semantics as mDNS spoof. `whodis watch --llmnr` adds the `llmnr_poison_responder` and `name_res_race_flood` anomaly classes.
+LLMNR (UDP/5355) is the Windows-side mDNS sibling. `whodis probe --llmnr <name>` resolves a name; `whodis spoof --llmnr <table.toml>` runs an authoritative responder with the same allow-list / scope / `whodis-scope.toml` semantics as mDNS spoof. `whodis sentinel --llmnr` adds the `llmnr_poison_responder` and `name_res_race_flood` anomaly classes.
 
 The headline use case is credential capture. `--preset wpad` pre-builds an answer table for `wpad`, `wpadproxy`, `wpad.local` (plus `wpad.<engagement_domain>` if `--domain` or `scope.engagement_domain` is set) and brings up a WPAD listener on TCP/8080 that drives the NTLMSSP challenge-response handshake to completion and writes hashcat mode 5600 lines to a `.hashes` file:
 
@@ -252,8 +252,8 @@ whodis browse --ble
 whodis browse --ble -t 30
 whodis probe  --ble <PERIPHERAL_ID>
 whodis probe  --ble <PERIPHERAL_ID> --duration 60
-whodis watch  --ble
-whodis watch  --ble --include-known
+whodis sentinel --ble
+whodis sentinel --ble --include-known
 ```
 
 `<PERIPHERAL_ID>` comes from `browse --ble` output. macOS uses CoreBluetooth UUIDs (it never exposes hardware MACs).

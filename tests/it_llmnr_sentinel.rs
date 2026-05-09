@@ -29,7 +29,7 @@ fn has_wpad_poison(captured: &Arc<Mutex<Vec<Anomaly>>>) -> bool {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn watch_llmnr_emits_poison_anomaly() {
+async fn sentinel_llmnr_emits_poison_anomaly() {
     let mdns_mode = test_mode();
     let llmnr_mode = llmnr_test_mode();
     let whodis::Mode::Custom {

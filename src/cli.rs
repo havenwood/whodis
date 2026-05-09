@@ -236,15 +236,15 @@ pub enum Cmd {
         show_dead: bool,
     },
 
-    /// Watch the LAN for mDNS spoofing signatures. Listen-only.
-    Watch {
-        /// Watch window in seconds. 0 = until Ctrl-C.
+    /// Passive sentinel for mDNS spoofing signatures. Listen-only.
+    Sentinel {
+        /// Sentinel window in seconds. 0 = until Ctrl-C.
         #[arg(short = 't', long, default_value_t = 0)]
         timeout: u64,
 
         /// Also observe traffic from local interface IPs. Off by default so
         /// legitimate local mDNS announces don't drown the output. Turn on to
-        /// dogfood `watch` against your own `flood`/`spoof` running on the same host.
+        /// dogfood `sentinel` against your own `flood`/`spoof` running on the same host.
         #[arg(long = "include-local")]
         include_local: bool,
 
@@ -794,7 +794,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             }
         }
         Cmd::Flood { kind } => run_flood(kind, scope).await?,
-        Cmd::Watch {
+        Cmd::Sentinel {
             timeout,
             include_local,
             llmnr,
@@ -802,9 +802,9 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             include_known,
         } => {
             if ble {
-                run_ble_watch(renderer, scope.clone(), include_known, timeout).await?;
+                run_ble_sentinel(renderer, scope.clone(), include_known, timeout).await?;
             } else {
-                run_watch(renderer, timeout, include_local, llmnr).await?;
+                run_sentinel(renderer, timeout, include_local, llmnr).await?;
             }
         }
         Cmd::Capture { pcap, timeout } => {
@@ -1332,7 +1332,7 @@ async fn run_spoof(
     Ok(())
 }
 
-async fn run_watch(
+async fn run_sentinel(
     renderer: Renderer,
     timeout: u64,
     include_local: bool,
@@ -1357,11 +1357,11 @@ async fn run_watch(
     }
     cancel.cancel();
     task.await
-        .map_err(|e| anyhow::anyhow!("watch task failed: {e}"))??;
+        .map_err(|e| anyhow::anyhow!("sentinel task failed: {e}"))??;
     Ok(())
 }
 
-async fn run_ble_watch(
+async fn run_ble_sentinel(
     renderer: Renderer,
     scope: Option<crate::scope::Scope>,
     include_known: bool,
@@ -2525,11 +2525,11 @@ mod tests {
         clippy::panic,
         reason = "test assertion intentionally panics on wrong variant"
     )]
-    fn cli_parses_watch_with_include_local() {
-        let c =
-            Cli::try_parse_from(["whodis", "watch", "--include-local", "-t", "5"]).expect("parse");
+    fn cli_parses_sentinel_with_include_local() {
+        let c = Cli::try_parse_from(["whodis", "sentinel", "--include-local", "-t", "5"])
+            .expect("parse");
         match c.command {
-            Cmd::Watch {
+            Cmd::Sentinel {
                 timeout,
                 include_local,
                 ..
@@ -2537,7 +2537,7 @@ mod tests {
                 assert_eq!(timeout, 5);
                 assert!(include_local);
             }
-            other => panic!("expected Watch, got {other:?}"),
+            other => panic!("expected Sentinel, got {other:?}"),
         }
     }
 
@@ -2546,10 +2546,10 @@ mod tests {
         clippy::panic,
         reason = "test assertion intentionally panics on wrong variant"
     )]
-    fn cli_parses_watch_default_excludes_local() {
-        let c = Cli::try_parse_from(["whodis", "watch"]).expect("parse");
+    fn cli_parses_sentinel_default_excludes_local() {
+        let c = Cli::try_parse_from(["whodis", "sentinel"]).expect("parse");
         match c.command {
-            Cmd::Watch {
+            Cmd::Sentinel {
                 timeout,
                 include_local,
                 ..
@@ -2557,7 +2557,7 @@ mod tests {
                 assert_eq!(timeout, 0);
                 assert!(!include_local);
             }
-            other => panic!("expected Watch, got {other:?}"),
+            other => panic!("expected Sentinel, got {other:?}"),
         }
     }
 
