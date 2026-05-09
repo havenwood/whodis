@@ -82,6 +82,12 @@ pub enum SsdpEvent {
 pub struct SsdpProbeOptions {
     pub timeout: Duration,
     pub mx: u32,
+    /// Override the M-SEARCH destination. `None` (production default) sends to
+    /// the SSDP multicast group `239.255.255.250:1900`. `Some(addr)` sends
+    /// unicast to `addr` instead - hosted macOS CI runners restrict outbound
+    /// multicast routing, so tests targeting a same-host responder can pass
+    /// `Some(127.0.0.1:1900)` to bypass the restriction.
+    pub target_override: Option<SocketAddr>,
 }
 
 impl Default for SsdpProbeOptions {
@@ -89,6 +95,7 @@ impl Default for SsdpProbeOptions {
         Self {
             timeout: Duration::from_secs(3),
             mx: DEFAULT_MX,
+            target_override: None,
         }
     }
 }
@@ -160,7 +167,9 @@ pub async fn probe(st: &str, opts: &SsdpProbeOptions) -> Result<Vec<SsdpDevice>>
     let bind: SocketAddr = SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
     let sock = tokio::net::UdpSocket::bind(bind).await?;
     sock.set_multicast_loop_v4(true)?;
-    let dst = SocketAddr::new(std::net::IpAddr::V4(SSDP_GROUP_V4), SSDP_PORT);
+    let dst = opts
+        .target_override
+        .unwrap_or_else(|| SocketAddr::new(std::net::IpAddr::V4(SSDP_GROUP_V4), SSDP_PORT));
     let bytes = build_msearch(st, opts.mx);
     sock.send_to(&bytes, dst).await?;
 
@@ -344,10 +353,24 @@ fn escape_for_triple_quoted(body: &str) -> String {
 /// Capture a real LAN `UPnP` device's M-SEARCH reply and description XML,
 /// ready to replay via `whodis spoof --ssdp`.
 pub async fn clone_device(usn: &str, timeout: Duration) -> Result<ClonedSsdpDevice> {
+    clone_device_with_target(usn, timeout, None).await
+}
+
+/// As `clone_device`, with an optional unicast M-SEARCH destination override.
+///
+/// `target_override = Some(addr)` replaces the SSDP multicast group with a
+/// unicast send to `addr`. Used by tests that target a same-host responder;
+/// production callers should use `clone_device`.
+pub async fn clone_device_with_target(
+    usn: &str,
+    timeout: Duration,
+    target_override: Option<SocketAddr>,
+) -> Result<ClonedSsdpDevice> {
     let st = extract_st_from_usn(usn).unwrap_or("ssdp:all");
     let opts = SsdpProbeOptions {
         timeout: timeout / 2,
         mx: DEFAULT_MX,
+        target_override,
     };
     let devices = probe(st, &opts).await?;
     let Some(device) = devices.into_iter().find(|d| d.usn == usn) else {

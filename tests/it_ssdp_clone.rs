@@ -2,7 +2,7 @@
 //! known device, runs clone against its USN, and verifies the resulting TOML
 //! round-trips through `ssdp_table::load` with all the expected fields.
 
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use whodis::Authorization;
@@ -43,9 +43,18 @@ async fn clone_device_captures_usn_st_server_and_description_xml() {
     let task = tokio::spawn(async move { responder.run().await });
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let cloned = ssdp::clone_device(
+    // Hosted macOS CI runners refuse to route outbound multicast from an
+    // ephemeral socket (errno 65 EHOSTUNREACH). Aim the M-SEARCH at the
+    // localhost responder directly so the test exercises clone_device's
+    // probe -> parse-LOCATION -> HTTP fetch flow without depending on the
+    // runner's multicast routing.
+    let cloned = ssdp::clone_device_with_target(
         "uuid:whodis-clone-test::urn:test:device:CloneMe:1",
         Duration::from_secs(3),
+        Some(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ssdp::SSDP_PORT,
+        )),
     )
     .await
     .expect("clone_device");

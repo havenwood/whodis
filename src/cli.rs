@@ -886,6 +886,7 @@ async fn run_ssdp_probe(renderer: Renderer, st: &str, timeout: u64, mx: u32) -> 
     let opts = crate::ssdp::SsdpProbeOptions {
         timeout: Duration::from_secs(timeout),
         mx,
+        target_override: None,
     };
     let devices = crate::ssdp::probe(st, &opts).await?;
     for d in devices {
