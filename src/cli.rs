@@ -1034,7 +1034,7 @@ async fn run_ble_browse(
     service_uuids: Vec<uuid::Uuid>,
     cancel: tokio_util::sync::CancellationToken,
 ) -> anyhow::Result<()> {
-    drop(service_uuids);
+    let svc_filter: std::collections::BTreeSet<uuid::Uuid> = service_uuids.into_iter().collect();
     let allow_ids: std::collections::BTreeSet<String> = scope
         .as_ref()
         .map(|s| s.allow_ble_ids.iter().cloned().collect())
@@ -1059,10 +1059,16 @@ async fn run_ble_browse(
         if known_ids.contains(ad.peripheral_id.as_str()) {
             return;
         }
-        if !allow_ids.is_empty() && !allow_ids.contains(ad.peripheral_id.as_str()) {
-            let vendor_ok =
-                crate::ble::fingerprint::vendor(&ad).is_some_and(|v| allow_vendors.contains(&v));
-            if !vendor_ok {
+        if !svc_filter.is_empty() && !ad.service_uuids.iter().any(|u| svc_filter.contains(u)) {
+            return;
+        }
+        let id_set = !allow_ids.is_empty();
+        let vendor_set = !allow_vendors.is_empty();
+        if id_set || vendor_set {
+            let id_match = id_set && allow_ids.contains(ad.peripheral_id.as_str());
+            let vendor_match = vendor_set
+                && crate::ble::fingerprint::vendor(&ad).is_some_and(|v| allow_vendors.contains(&v));
+            if !id_match && !vendor_match {
                 return;
             }
         }
