@@ -76,6 +76,10 @@ pub enum Anomaly {
         qtype: String,
         src: String,
     },
+    LlmnrPoisonResponder {
+        name: String,
+        src: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -95,7 +99,8 @@ impl Anomaly {
             | Self::WhodisConflictSignature { .. }
             | Self::CacheFlushRateExceeded { .. }
             | Self::GoodbyeThenTakeover { .. }
-            | Self::SourceIpMismatch { .. } => "high",
+            | Self::SourceIpMismatch { .. }
+            | Self::LlmnrPoisonResponder { .. } => "high",
         }
     }
 }
@@ -120,6 +125,7 @@ enum AnomalyKey {
     ServiceTypeGoodbyeBurst(String, IpAddr),
     SourceIpMismatch(String, RecordType, IpAddr, IpAddr),
     UnsolicitedAdditional(String, RecordType, IpAddr),
+    LlmnrPoison(String, IpAddr),
 }
 
 /// Pure, transport-free anomaly tracker. Public so tests and embedders can drive it directly.
@@ -136,6 +142,17 @@ impl AnomalyTracker {
 
     pub fn observe(&mut self, msg: &Message, src: SocketAddr) -> Vec<Anomaly> {
         self.observe_at(msg, src, Instant::now())
+    }
+
+    pub fn observe_llmnr_response(&mut self, name: &str, source: std::net::IpAddr) -> Vec<Anomaly> {
+        let key = AnomalyKey::LlmnrPoison(name.to_string(), source);
+        if !self.state.reported.insert(key) {
+            return Vec::new();
+        }
+        vec![Anomaly::LlmnrPoisonResponder {
+            name: name.to_string(),
+            src: source.to_string(),
+        }]
     }
 
     /// Test hook: explicit clock so windowed checks are deterministic.
@@ -1103,5 +1120,42 @@ mod tests {
         msg.set_message_type(MessageType::Query);
         let out = t.observe_at(&msg, src("10.0.0.1"), now);
         assert!(out.is_empty(), "queries should not produce anomalies");
+    }
+
+    #[test]
+    fn llmnr_poison_responder_fires_on_unknown_source() {
+        let mut tracker = AnomalyTracker::new();
+        let src1: std::net::IpAddr = "10.0.0.5".parse().expect("ip");
+
+        let anomalies = tracker.observe_llmnr_response("wpad", src1);
+        assert!(
+            anomalies.iter().any(|a| matches!(
+                a,
+                Anomaly::LlmnrPoisonResponder { name, src }
+                    if name == "wpad" && src == &src1.to_string()
+            )),
+            "expected LlmnrPoisonResponder with correct name and src, got {anomalies:?}"
+        );
+
+        // Same source for the same name does not re-fire (dedup).
+        let again = tracker.observe_llmnr_response("wpad", src1);
+        assert!(again.is_empty(), "expected dedup, got {again:?}");
+    }
+
+    #[test]
+    fn llmnr_poison_responder_fires_per_source_per_name() {
+        let mut tracker = AnomalyTracker::new();
+        let src1: std::net::IpAddr = "10.0.0.5".parse().expect("ip");
+        let src2: std::net::IpAddr = "10.0.0.6".parse().expect("ip");
+
+        drop(tracker.observe_llmnr_response("wpad", src1));
+        let second = tracker.observe_llmnr_response("wpad", src2);
+        assert!(
+            second.iter().any(|a| matches!(
+                a,
+                Anomaly::LlmnrPoisonResponder { src, .. } if src == &src2.to_string()
+            )),
+            "expected LlmnrPoisonResponder with src2, got {second:?}"
+        );
     }
 }
