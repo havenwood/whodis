@@ -34,6 +34,7 @@ pub mod flood;
 pub mod probe;
 pub mod spoof;
 pub mod ssdp;
+pub mod ssdp_table;
 
 pub use auth::Authorization;
 pub use cli::{Cli, Cmd, FloodCmd, run};

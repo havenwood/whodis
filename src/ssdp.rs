@@ -7,7 +7,7 @@
 //! as mDNS so we coexist cleanly with anything third-party (Plex, VLC) that
 //! happens to be listening.
 //!
-//! v1: browse / probe / flood byebye. v2 will add spoof + watch.
+//! v1: browse / probe / flood byebye. v2a: spoof responder + LOCATION HTTP server.
 
 use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -22,9 +22,10 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 
 use crate::auth::Authorization;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::flood::FloodOptions;
 use crate::mode::Mode;
+use crate::ssdp_table::SsdpAnswerTable;
 use crate::transport::{Destination, Transport, recv_one};
 
 pub const SSDP_GROUP_V4: Ipv4Addr = Ipv4Addr::new(239, 255, 255, 250);
@@ -355,6 +356,356 @@ fn device_from_headers(
         max_age,
         headers: extras,
     })
+}
+
+/// Authoritative SSDP responder. Replies to M-SEARCH unicast, optionally emits
+/// periodic NOTIFY ssdp:alive, and serves the LOCATION URL via an embedded HTTP
+/// server.
+pub struct SsdpResponder {
+    transport: Arc<Transport>,
+    table: Arc<SsdpAnswerTable>,
+    auth: Authorization,
+    cancel: CancellationToken,
+    http_host: Ipv4Addr,
+    reannounce: Option<Duration>,
+}
+
+impl SsdpResponder {
+    pub fn new(
+        auth: Authorization,
+        table: SsdpAnswerTable,
+        http_host: Ipv4Addr,
+        reannounce: Option<Duration>,
+    ) -> Result<Self> {
+        if table.is_empty() {
+            return Err(Error::InvalidServiceType(
+                "SSDP responder requires at least one device".into(),
+            ));
+        }
+        let transport = Arc::new(Transport::build(ssdp_mode())?);
+        Ok(Self {
+            transport,
+            table: Arc::new(table),
+            auth,
+            cancel: CancellationToken::new(),
+            http_host,
+            reannounce,
+        })
+    }
+
+    #[must_use]
+    pub fn cancel_token(&self) -> CancellationToken {
+        self.cancel.clone()
+    }
+
+    pub async fn run(self) -> Result<()> {
+        let http_listener = tokio::net::TcpListener::bind(SocketAddr::new(
+            std::net::IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            self.table.http_port,
+        ))
+        .await?;
+        tracing::info!(
+            port = self.table.http_port,
+            host = %self.http_host,
+            "ssdp responder: HTTP server bound"
+        );
+
+        let http_table = self.table.clone();
+        let http_cancel = self.cancel.clone();
+        let http_task = tokio::spawn(async move {
+            http_serve(http_listener, http_table, http_cancel).await;
+        });
+
+        let reannounce_task = if let Some(interval) = self.reannounce {
+            let table = self.table.clone();
+            let auth = self.auth.clone();
+            let transport = self.transport.clone();
+            let cancel = self.cancel.clone();
+            let host = self.http_host;
+            Some(tokio::spawn(async move {
+                let mut tick = tokio::time::interval(interval);
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    tokio::select! {
+                        () = cancel.cancelled() => return,
+                        _ = tick.tick() => {
+                            for d in &table.devices {
+                                if !permits_device(&auth, &d.usn) {
+                                    continue;
+                                }
+                                let bytes = build_alive(d, host, table.http_port, table.ttl);
+                                if let Err(e) = transport
+                                    .send_query(&bytes, Destination::Multicast)
+                                    .await
+                                {
+                                    tracing::debug!(error = %e, "ssdp alive send failed");
+                                }
+                            }
+                        }
+                    }
+                }
+            }))
+        } else {
+            None
+        };
+
+        let v4 = self.transport.v4();
+        let v6 = self.transport.v6();
+        let mut buf = vec![0u8; 9000];
+        loop {
+            tokio::select! {
+                () = self.cancel.cancelled() => break,
+                r = recv_one(v4.as_ref(), v6.as_ref(), &mut buf) => {
+                    match r {
+                        Ok(Some((n, src))) => {
+                            let payload = buf.get(..n).unwrap_or(&[]);
+                            self.handle_msearch(payload, src).await;
+                        }
+                        Ok(None) => {}
+                        Err(e) => tracing::debug!(error = %e, "ssdp responder rx error, continuing"),
+                    }
+                }
+            }
+        }
+
+        if let Some(t) = reannounce_task {
+            t.abort();
+        }
+        http_task.abort();
+        Ok(())
+    }
+
+    async fn handle_msearch(&self, payload: &[u8], src: SocketAddr) {
+        let Ok(text) = std::str::from_utf8(payload) else {
+            return;
+        };
+        if !text.starts_with("M-SEARCH ") {
+            return;
+        }
+        let mut st: Option<&str> = None;
+        for line in text.split("\r\n") {
+            if let Some(v) = line
+                .strip_prefix("ST:")
+                .or_else(|| line.strip_prefix("st:"))
+            {
+                st = Some(v.trim());
+                break;
+            }
+        }
+        let Some(search_st) = st else {
+            return;
+        };
+        if !self.auth.permits_addr(src.ip()) {
+            tracing::debug!(src = %src, "ssdp responder: blocked by allow-list");
+            return;
+        }
+        for device in self.table.match_st(search_st) {
+            if !permits_device(&self.auth, &device.usn) {
+                continue;
+            }
+            let bytes = build_msearch_reply(
+                device,
+                self.http_host,
+                self.table.http_port,
+                self.table.ttl,
+                search_st,
+            );
+            if let Err(e) = self
+                .transport
+                .send_query(&bytes, Destination::Unicast(src))
+                .await
+            {
+                tracing::debug!(error = %e, src = %src, "ssdp reply send failed");
+            }
+        }
+    }
+}
+
+fn permits_device(auth: &Authorization, usn: &str) -> bool {
+    extract_uuid_from_usn(usn).is_none_or(|uuid| auth.permits_instance(uuid))
+}
+
+fn build_msearch_reply(
+    device: &crate::ssdp_table::SsdpDeviceEntry,
+    http_host: Ipv4Addr,
+    http_port: u16,
+    ttl: u32,
+    requested_st: &str,
+) -> Vec<u8> {
+    // Per UPnP DA: response ST is always the device's specific URN, not the
+    // requested ST (even for ssdp:all). The `requested_st` arg is kept for future
+    // extension (e.g. logging).
+    let _ = requested_st;
+    let response_st = device.st.as_str();
+    format!(
+        "HTTP/1.1 200 OK\r\n\
+         CACHE-CONTROL: max-age={ttl}\r\n\
+         DATE: {date}\r\n\
+         EXT:\r\n\
+         LOCATION: http://{http_host}:{http_port}{path}\r\n\
+         SERVER: {server}\r\n\
+         ST: {response_st}\r\n\
+         USN: {usn}\r\n\
+         \r\n",
+        date = http_date_now(),
+        path = device.location_path,
+        server = device.server,
+        usn = device.usn,
+    )
+    .into_bytes()
+}
+
+fn build_alive(
+    device: &crate::ssdp_table::SsdpDeviceEntry,
+    http_host: Ipv4Addr,
+    http_port: u16,
+    ttl: u32,
+) -> Vec<u8> {
+    format!(
+        "NOTIFY * HTTP/1.1\r\n\
+         HOST: {SSDP_GROUP_V4}:{SSDP_PORT}\r\n\
+         CACHE-CONTROL: max-age={ttl}\r\n\
+         LOCATION: http://{http_host}:{http_port}{path}\r\n\
+         NT: {nt}\r\n\
+         NTS: ssdp:alive\r\n\
+         SERVER: {server}\r\n\
+         USN: {usn}\r\n\
+         \r\n",
+        path = device.location_path,
+        nt = device.st,
+        server = device.server,
+        usn = device.usn,
+    )
+    .into_bytes()
+}
+
+fn http_date_now() -> String {
+    // IMF-fixdate per RFC 7231 §7.1.1.1 (a.k.a. RFC 1123 HTTP-date), the form
+    // UPnP DA expects in the DATE header.
+    use time::OffsetDateTime;
+    use time::macros::format_description;
+    let fmt = format_description!(
+        "[weekday repr:short], [day padding:zero] [month repr:short] [year] \
+         [hour]:[minute]:[second] GMT"
+    );
+    OffsetDateTime::now_utc()
+        .format(fmt)
+        .unwrap_or_else(|_| "Thu, 01 Jan 1970 00:00:00 GMT".to_string())
+}
+
+const HTTP_MAX_REQUEST_SIZE: usize = 4 * 1024;
+const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(5);
+const HTTP_MAX_CONCURRENT: usize = 32;
+
+async fn http_serve(
+    listener: tokio::net::TcpListener,
+    table: Arc<SsdpAnswerTable>,
+    cancel: CancellationToken,
+) {
+    let sem = Arc::new(tokio::sync::Semaphore::new(HTTP_MAX_CONCURRENT));
+    loop {
+        tokio::select! {
+            () = cancel.cancelled() => return,
+            r = listener.accept() => {
+                match r {
+                    Ok((stream, peer)) => {
+                        let Ok(permit) = sem.clone().try_acquire_owned() else {
+                            tracing::debug!(peer = %peer, "ssdp http: dropping connection (over limit)");
+                            continue;
+                        };
+                        let table = table.clone();
+                        tokio::spawn(async move {
+                            let _permit = permit;
+                            if let Err(e) = http_handle(stream, table).await {
+                                tracing::debug!(error = %e, peer = %peer, "ssdp http handle error");
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        tracing::debug!(error = %e, "ssdp http accept error");
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn http_handle(
+    mut stream: tokio::net::TcpStream,
+    table: Arc<SsdpAnswerTable>,
+) -> std::io::Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut buf = vec![0u8; HTTP_MAX_REQUEST_SIZE];
+    let mut filled = 0;
+    let read_fut = async {
+        loop {
+            let Some(rest) = buf.get_mut(filled..) else {
+                return Ok::<(), std::io::Error>(());
+            };
+            let n = stream.read(rest).await?;
+            if n == 0 {
+                return Ok(());
+            }
+            filled += n;
+            if buf
+                .get(..filled)
+                .is_some_and(|s| s.windows(4).any(|w| w == b"\r\n\r\n"))
+            {
+                return Ok(());
+            }
+            if filled >= buf.len() {
+                return Ok(());
+            }
+        }
+    };
+    if let Err(e) = tokio::time::timeout(HTTP_READ_TIMEOUT, read_fut).await {
+        return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, e));
+    }
+
+    let request = std::str::from_utf8(buf.get(..filled).unwrap_or(&[])).unwrap_or("");
+    let start_line = request.split("\r\n").next().unwrap_or("");
+    if start_line.is_empty() {
+        stream.write_all(http_404().as_bytes()).await?;
+        return Ok(());
+    }
+    // Expect "GET <path> HTTP/1.1"
+    let mut parts = start_line.split_whitespace();
+    let _method = parts.next().unwrap_or("");
+    let path = parts.next().unwrap_or("");
+
+    let response = table.find_by_path(path).map_or_else(
+        || http_404().into_bytes(),
+        |device| {
+            let body = device.description_xml.as_bytes();
+            let mut out = format!(
+                "HTTP/1.1 200 OK\r\n\
+                 Content-Type: text/xml; charset=\"utf-8\"\r\n\
+                 Content-Length: {}\r\n\
+                 Connection: close\r\n\
+                 \r\n",
+                body.len()
+            )
+            .into_bytes();
+            out.extend_from_slice(body);
+            out
+        },
+    );
+    stream.write_all(&response).await?;
+    stream.shutdown().await.ok();
+    Ok(())
+}
+
+fn http_404() -> String {
+    let body = b"404 Not Found";
+    format!(
+        "HTTP/1.1 404 Not Found\r\n\
+         Content-Type: text/plain\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\
+         \r\n",
+        body.len()
+    ) + std::str::from_utf8(body).unwrap_or("")
 }
 
 #[cfg(test)]

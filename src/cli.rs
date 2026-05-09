@@ -224,25 +224,25 @@ pub enum Cmd {
         timeout: u64,
     },
 
-    /// Run an authoritative responder against the given TOML answer table.
+    /// Run an authoritative mDNS or SSDP responder against the given TOML answer table.
     Spoof {
         /// Path to a TOML answer table. Optional when --template is given.
         #[arg(value_name = "TABLE", required_unless_present = "template")]
         table: Option<std::path::PathBuf>,
 
-        /// Built-in service template. Requires --name and --ip.
-        #[arg(long, value_enum, requires = "name", requires_all = ["name", "ip"])]
+        /// Built-in service template. Requires --name and --ip. mDNS-only.
+        #[arg(long, value_enum, requires = "name", requires_all = ["name", "ip"], conflicts_with = "ssdp")]
         template: Option<Template>,
 
-        /// Instance name for the template (e.g. "Conf Room").
+        /// Instance name for the template (e.g. "Conf Room"). mDNS-only.
         #[arg(long, requires = "template")]
         name: Option<String>,
 
-        /// IPv4 address for the template A record.
+        /// IPv4 address for the template A record. mDNS-only.
         #[arg(long, requires = "template")]
         ip: Option<Ipv4Addr>,
 
-        #[arg(long, default_value_t = 3)]
+        #[arg(long, default_value_t = 3, conflicts_with = "ssdp")]
         burst: u8,
 
         #[arg(long = "allow", value_name = "CIDR")]
@@ -251,26 +251,36 @@ pub enum Cmd {
         #[arg(long = "allow-instance", value_name = "NAME")]
         allow_instance: Vec<String>,
 
-        /// Bridge inbound TCP on spoofed ports to HOST:PORT (full MITM).
-        #[arg(long, value_name = "HOST:PORT")]
+        /// Bridge inbound TCP on spoofed ports to HOST:PORT (full MITM). mDNS-only.
+        #[arg(long, value_name = "HOST:PORT", conflicts_with = "ssdp")]
         relay: Option<SocketAddr>,
 
-        /// Where spoof answers are sent.
-        #[arg(long, value_enum, default_value_t = ReplyMode::Multicast)]
+        /// Where spoof answers are sent. mDNS-only.
+        #[arg(long, value_enum, default_value_t = ReplyMode::Multicast, conflicts_with = "ssdp")]
         reply: ReplyMode,
 
-        /// Periodically multicast our spoofed records to push them into client caches.
+        /// Periodically push our spoofed records into client caches.
         /// 0 means only reply to incoming queries (default).
         #[arg(long, value_name = "SECS", default_value_t = 0)]
         reannounce_interval: u64,
 
-        /// Passive dry-run: report matching queries and conflicts without answering.
-        #[arg(long)]
+        /// Passive dry-run: report matching queries and conflicts without answering. mDNS-only.
+        #[arg(long, conflicts_with = "ssdp")]
         monitor: bool,
 
-        /// Monitor window in seconds. 0 = until Ctrl-C.
+        /// Window in seconds. 0 = until Ctrl-C.
         #[arg(short = 't', long, default_value_t = 0)]
         timeout: u64,
+
+        /// Run as an `SSDP` / `UPnP` responder instead of `mDNS`. Interprets `TABLE`
+        /// as an SSDP TOML schema (see docs).
+        #[arg(long)]
+        ssdp: bool,
+
+        /// LOCATION URL host (advertised IPv4) for SSDP responses. Defaults to the
+        /// first non-loopback interface IP. SSDP-only.
+        #[arg(long, value_name = "IP", requires = "ssdp")]
+        http_host: Option<Ipv4Addr>,
     },
 
     /// Capture a real LAN instance and emit a TOML answer table mimicking it.
@@ -561,24 +571,46 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             reannounce_interval,
             monitor,
             timeout,
+            ssdp,
+            http_host,
         } => {
-            run_spoof(
-                renderer,
-                table,
-                template,
-                name,
-                ip,
-                burst,
-                allow,
-                allow_instance,
-                relay,
-                reply,
-                reannounce_interval,
-                monitor,
-                timeout,
-                scope,
-            )
-            .await?;
+            if ssdp {
+                let table_path =
+                    table.context("--ssdp spoof requires a TABLE positional argument")?;
+                run_ssdp_spoof(
+                    renderer,
+                    &table_path,
+                    http_host,
+                    if reannounce_interval == 0 {
+                        None
+                    } else {
+                        Some(Duration::from_secs(reannounce_interval))
+                    },
+                    timeout,
+                    allow,
+                    allow_instance,
+                    scope,
+                )
+                .await?;
+            } else {
+                run_spoof(
+                    renderer,
+                    table,
+                    template,
+                    name,
+                    ip,
+                    burst,
+                    allow,
+                    allow_instance,
+                    relay,
+                    reply,
+                    reannounce_interval,
+                    monitor,
+                    timeout,
+                    scope,
+                )
+                .await?;
+            }
         }
         Cmd::Enum { host, timeout } => {
             // If no positional arg and no explicit timeout, use 8s for discovery; otherwise use defaults.
@@ -1168,6 +1200,88 @@ fn paint_anomaly(enabled: bool, body: &str, color: &str) -> String {
     } else {
         body.to_string()
     }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "all args map 1:1 to CLI flags; splitting into a struct would obscure the relationship"
+)]
+async fn run_ssdp_spoof(
+    _renderer: Renderer,
+    table_path: &std::path::Path,
+    http_host: Option<Ipv4Addr>,
+    reannounce: Option<Duration>,
+    timeout: u64,
+    allow: Vec<IpNet>,
+    allow_instance: Vec<String>,
+    scope: Option<crate::scope::Scope>,
+) -> anyhow::Result<()> {
+    let raw = std::fs::read_to_string(table_path)
+        .with_context(|| format!("reading {}", table_path.display()))?;
+    let table = crate::ssdp_table::load(&raw)?;
+    let host = match http_host {
+        Some(h) => h,
+        None => derive_local_v4_ip().context(
+            "no --http-host given and no non-loopback IPv4 interface found; pass --http-host explicitly",
+        )?,
+    };
+    let auth = if let Some(s) = scope {
+        s.into_auth(allow, allow_instance)
+    } else {
+        let mut a = Authorization::new();
+        for cidr in allow {
+            a = a.allow_subnet(cidr);
+        }
+        for inst_name in allow_instance {
+            a = a.allow_instance(inst_name);
+        }
+        a
+    };
+    let responder = crate::ssdp::SsdpResponder::new(auth, table, host, reannounce)?;
+    let cancel = responder.cancel_token();
+    let mut task = tokio::spawn(async move { responder.run().await });
+
+    // Race the task against the timeout / Ctrl-C so an early-exit (e.g. HTTP
+    // bind failure on macOS port 5000) surfaces as an error instead of being
+    // hidden by the wait window.
+    let outcome = tokio::select! {
+        biased;
+        r = &mut task => Some(r),
+        () = wait_for_window(timeout) => None,
+    };
+    cancel.cancel();
+    match outcome {
+        Some(Ok(Ok(()))) => Ok(()),
+        Some(Ok(Err(e))) => Err(e.into()),
+        Some(Err(e)) => Err(anyhow::anyhow!("ssdp responder task panicked: {e}")),
+        None => {
+            // Timer fired first; let the task finish cleanly.
+            match task.await {
+                Ok(Ok(())) | Err(_) => Ok(()),
+                Ok(Err(e)) => Err(e.into()),
+            }
+        }
+    }
+}
+
+async fn wait_for_window(timeout: u64) {
+    if timeout > 0 {
+        tokio::time::sleep(Duration::from_secs(timeout)).await;
+    } else {
+        tokio::signal::ctrl_c().await.ok();
+    }
+}
+
+fn derive_local_v4_ip() -> anyhow::Result<Ipv4Addr> {
+    for iface in get_if_addrs::get_if_addrs().context("listing interfaces")? {
+        if iface.is_loopback() {
+            continue;
+        }
+        if let std::net::IpAddr::V4(v4) = iface.ip() {
+            return Ok(v4);
+        }
+    }
+    anyhow::bail!("no non-loopback IPv4 interface found")
 }
 
 async fn run_spoof_monitor(
@@ -1898,6 +2012,98 @@ mod tests {
         assert!(name_str.ends_with(".pcap"));
         assert!(name_str.contains('T'));
         assert!(name_str.contains('Z'));
+    }
+
+    #[test]
+    #[allow(
+        clippy::panic,
+        reason = "test assertion intentionally panics on wrong variant"
+    )]
+    fn cli_parses_spoof_with_ssdp() {
+        let c = Cli::try_parse_from(["whodis", "spoof", "answers.toml", "--ssdp"]).expect("parse");
+        match c.command {
+            Cmd::Spoof {
+                ssdp, http_host, ..
+            } => {
+                assert!(ssdp);
+                assert!(http_host.is_none());
+            }
+            other => panic!("expected Spoof, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[allow(
+        clippy::panic,
+        reason = "test assertion intentionally panics on wrong variant"
+    )]
+    fn cli_parses_spoof_ssdp_with_http_host() {
+        let c = Cli::try_parse_from([
+            "whodis",
+            "spoof",
+            "answers.toml",
+            "--ssdp",
+            "--http-host",
+            "127.0.0.1",
+        ])
+        .expect("parse");
+        match c.command {
+            Cmd::Spoof {
+                ssdp, http_host, ..
+            } => {
+                assert!(ssdp);
+                assert_eq!(http_host, Some(Ipv4Addr::LOCALHOST));
+            }
+            other => panic!("expected Spoof, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_rejects_http_host_without_ssdp() {
+        let err = Cli::try_parse_from([
+            "whodis",
+            "spoof",
+            "answers.toml",
+            "--http-host",
+            "127.0.0.1",
+        ]);
+        assert!(err.is_err(), "--http-host should require --ssdp");
+    }
+
+    #[test]
+    fn cli_rejects_spoof_template_with_ssdp() {
+        let err = Cli::try_parse_from([
+            "whodis",
+            "spoof",
+            "answers.toml",
+            "--ssdp",
+            "--template",
+            "ssh",
+            "--name",
+            "x",
+            "--ip",
+            "1.2.3.4",
+        ]);
+        assert!(err.is_err(), "--template should conflict with --ssdp");
+    }
+
+    #[test]
+    fn cli_rejects_spoof_relay_with_ssdp() {
+        let err = Cli::try_parse_from([
+            "whodis",
+            "spoof",
+            "answers.toml",
+            "--ssdp",
+            "--relay",
+            "10.0.0.1:5000",
+        ]);
+        assert!(err.is_err(), "--relay should conflict with --ssdp");
+    }
+
+    #[test]
+    fn cli_rejects_spoof_monitor_with_ssdp() {
+        let err = Cli::try_parse_from(["whodis", "spoof", "answers.toml", "--ssdp", "--monitor"]);
+        assert!(err.is_err(), "--monitor should conflict with --ssdp");
     }
 
     #[test]
