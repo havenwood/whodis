@@ -1459,6 +1459,18 @@ async fn run_llmnr_spoof(
     if preset.as_deref().map(str::to_ascii_lowercase).as_deref() == Some("wpad") {
         flavors.insert("wpad".into());
         flavors.insert("http".into());
+        tracing::warn!(
+            "WPAD-over-LLMNR is disabled by default in Windows 10+ since ADV170012 (2018). \
+             Treat hits as bonus, not primary. If no captures land in 5 minutes, pivot to \
+             SMB-driven capture (UNC paths, mapped drives) which is the more reliable \
+             vector on modern Windows estates."
+        );
+        tracing::warn!(
+            "Captured hashes are Net-NTLMv2 for offline cracking only -- not relay material. \
+             SMB signing on modern domain clients does not block capture but does block relay. \
+             NTLM may be disabled outright (LmCompatibilityLevel=5 / Restrict-NTLM); in that \
+             case nothing will land regardless of WPAD reachability."
+        );
     }
 
     // --- Hash output file and listeners ---
