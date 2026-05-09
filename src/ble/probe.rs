@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 use crate::ble::continuity::{self, ContinuityPayload};
 use crate::ble::fingerprint;
 use crate::ble::scan::{BleEventSource, Scanner};
-use crate::ble::types::{AirDropMode, BleAdvertisement, BleDevice, PeripheralId};
+use crate::ble::types::{AirDropMode, BleAdvertisement, BleDevice, PeripheralId, RssiSample};
 use crate::error::{Error, Result};
 
 /// Run a scan for `duration`, collecting only advertisements that match
@@ -84,6 +84,23 @@ pub async fn probe_peripheral(
         .map(|a| a.timestamp)
         .max()
         .unwrap_or(merged_ad.timestamp);
+    let rssi_samples: Vec<RssiSample> = ads_snapshot
+        .iter()
+        .map(|a| RssiSample {
+            rssi: a.rssi,
+            at: a.timestamp,
+        })
+        .collect();
+    let observation_count = ads_snapshot.len();
+
+    let BleAdvertisement {
+        local_name,
+        address_type,
+        tx_power,
+        service_uuids,
+        manufacturer_data,
+        ..
+    } = merged_ad;
 
     Ok(Some(BleDevice {
         peripheral_id: target_id,
@@ -92,6 +109,13 @@ pub async fn probe_peripheral(
         device_class,
         continuity: all_payloads,
         airdrop_mode,
+        local_name,
+        address_type,
+        tx_power,
+        service_uuids,
+        manufacturer_data,
+        rssi_samples,
+        observation_count,
         first_seen,
         last_seen,
     }))

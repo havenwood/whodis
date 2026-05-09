@@ -40,7 +40,9 @@ pub mod ssdp;
 pub mod ssdp_table;
 
 pub use auth::Authorization;
-pub use ble::{AddressType, AirDropMode, BleAdvertisement, BleDevice, DeviceClass, PeripheralId};
+pub use ble::{
+    AddressType, AirDropMode, BleAdvertisement, BleDevice, DeviceClass, PeripheralId, RssiSample,
+};
 pub use cli::{Cli, Cmd, FloodCmd, run};
 pub use error::{Error, Result};
 pub use mode::{MDNS_GROUP_V4, MDNS_GROUP_V6, MDNS_PORT, Mode};

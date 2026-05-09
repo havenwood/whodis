@@ -506,14 +506,93 @@ pub(crate) fn emit_ble_advertisement(renderer: Renderer, ad: &BleAdvertisement) 
 pub(crate) fn emit_ble_device(renderer: Renderer, device: &BleDevice) -> io::Result<()> {
     match renderer {
         Renderer::Jsonl => emit_jsonl(device),
-        Renderer::Pretty(_) => {
-            let vendor = device.vendor.as_deref().unwrap_or("?");
-            let product = device.product.as_deref().unwrap_or("?");
-            emit_raw(&format!(
-                "{} vendor={} product={} class={:?}\n",
-                device.peripheral_id, vendor, product, device.device_class
-            ))
+        Renderer::Pretty(_) => emit_ble_device_pretty(device),
+    }
+}
+
+fn emit_ble_device_pretty(device: &BleDevice) -> io::Result<()> {
+    let vendor = device.vendor.as_deref().unwrap_or("?");
+    let product = device.product.as_deref().unwrap_or("?");
+    let name = device.local_name.as_deref().unwrap_or("(no name)");
+    let mut line = format!(
+        "{}  {}  vendor={}  product={}  class={:?}  obs={}",
+        device.peripheral_id, name, vendor, product, device.device_class, device.observation_count
+    );
+    if let Some(stats) = rssi_stats(&device.rssi_samples) {
+        let _ = std::fmt::Write::write_fmt(
+            &mut line,
+            format_args!("  rssi={}/{}/{}", stats.min, stats.mean_rounded, stats.max),
+        );
+    }
+    if let Some(mode) = device.airdrop_mode {
+        let _ = std::fmt::Write::write_fmt(&mut line, format_args!("  airdrop={mode:?}"));
+    }
+    if !device.continuity.is_empty() {
+        let kinds: Vec<&str> = device.continuity.iter().map(continuity_kind_name).collect();
+        let _ = std::fmt::Write::write_fmt(
+            &mut line,
+            format_args!("  continuity=[{}]", kinds.join(",")),
+        );
+    }
+    if !device.service_uuids.is_empty() {
+        let labels: Vec<String> = device
+            .service_uuids
+            .iter()
+            .map(|u| {
+                crate::ble::service_uuids::well_known(*u)
+                    .map_or_else(|| u.to_string(), String::from)
+            })
+            .collect();
+        let _ = std::fmt::Write::write_fmt(
+            &mut line,
+            format_args!("  services=[{}]", labels.join(",")),
+        );
+    }
+    line.push('\n');
+    emit_raw(&line)
+}
+
+struct RssiStats {
+    min: i16,
+    max: i16,
+    mean_rounded: i16,
+}
+
+fn rssi_stats(samples: &[crate::ble::RssiSample]) -> Option<RssiStats> {
+    if samples.is_empty() {
+        return None;
+    }
+    let mut min = i16::MAX;
+    let mut max = i16::MIN;
+    let mut sum: i64 = 0;
+    for s in samples {
+        if s.rssi < min {
+            min = s.rssi;
         }
+        if s.rssi > max {
+            max = s.rssi;
+        }
+        sum += i64::from(s.rssi);
+    }
+    let n = i64::try_from(samples.len()).unwrap_or(1);
+    let mean = sum / n.max(1);
+    let mean_rounded = i16::try_from(mean).unwrap_or(0);
+    Some(RssiStats {
+        min,
+        max,
+        mean_rounded,
+    })
+}
+
+fn continuity_kind_name(p: &crate::ble::continuity::ContinuityPayload) -> &'static str {
+    use crate::ble::continuity::ContinuityPayload;
+    match p {
+        ContinuityPayload::NearbyInfo { .. } => "nearby",
+        ContinuityPayload::HandoffSeed { .. } => "handoff",
+        ContinuityPayload::AirDropPair { .. } => "airdrop",
+        ContinuityPayload::FindMy { .. } => "findmy",
+        ContinuityPayload::ProximityPair { .. } => "proximity",
+        ContinuityPayload::Unknown { .. } => "unknown",
     }
 }
 

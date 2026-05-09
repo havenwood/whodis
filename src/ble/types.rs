@@ -87,6 +87,15 @@ pub struct BleAdvertisement {
     pub timestamp: SystemTime,
 }
 
+/// One RSSI observation. Used to back proximity sparklines and
+/// presence-rate inference in `watch --ble`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RssiSample {
+    pub rssi: i16,
+    #[serde(with = "system_time_millis")]
+    pub at: SystemTime,
+}
+
 /// Aggregated view of one BLE device after fingerprinting and Continuity decode.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BleDevice {
@@ -96,6 +105,17 @@ pub struct BleDevice {
     pub device_class: DeviceClass,
     pub continuity: Vec<crate::ble::continuity::ContinuityPayload>,
     pub airdrop_mode: Option<AirDropMode>,
+    pub local_name: Option<String>,
+    pub address_type: Option<AddressType>,
+    pub tx_power: Option<i8>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub service_uuids: Vec<Uuid>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub manufacturer_data: BTreeMap<u16, Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rssi_samples: Vec<RssiSample>,
+    #[serde(default)]
+    pub observation_count: usize,
     #[serde(with = "system_time_millis")]
     pub last_seen: SystemTime,
     #[serde(with = "system_time_millis")]
