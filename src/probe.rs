@@ -83,6 +83,66 @@ pub(crate) async fn probe_service_with_mode(
     browse_instances_with_mode(service, None, opts, mode).await
 }
 
+pub async fn probe_llmnr(
+    name: &str,
+    want_v6: bool,
+    timeout: std::time::Duration,
+    cancel: tokio_util::sync::CancellationToken,
+) -> Result<Vec<crate::name_res::llmnr::LlmnrAnswer>> {
+    probe_llmnr_with_mode(
+        name,
+        want_v6,
+        timeout,
+        crate::name_res::llmnr::llmnr_mode(),
+        cancel,
+    )
+    .await
+}
+
+pub async fn probe_llmnr_with_mode(
+    name: &str,
+    want_v6: bool,
+    timeout: std::time::Duration,
+    mode: Mode,
+    cancel: tokio_util::sync::CancellationToken,
+) -> Result<Vec<crate::name_res::llmnr::LlmnrAnswer>> {
+    let transport = crate::transport::Transport::build(mode)?;
+    let query = crate::name_res::llmnr::encode_query(name, want_v6)?;
+    transport
+        .send_query(&query, crate::transport::Destination::Multicast)
+        .await?;
+
+    let v4 = transport.v4();
+    let v6 = transport.v6();
+    let mut buf = vec![0u8; 4096];
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut answers: Vec<crate::name_res::llmnr::LlmnrAnswer> = Vec::new();
+
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Ok(answers);
+        }
+        tokio::select! {
+            () = cancel.cancelled() => return Ok(answers),
+            r = tokio::time::timeout(
+                remaining,
+                crate::transport::recv_one(v4.as_ref(), v6.as_ref(), &mut buf),
+            ) => match r {
+                Ok(Err(e)) => return Err(e.into()),
+                Err(_) | Ok(Ok(None)) => return Ok(answers),
+                Ok(Ok(Some((n, _src)))) => {
+                    if let Ok(more) = crate::name_res::llmnr::decode_message(
+                        buf.get(..n).unwrap_or(&[]),
+                    ) {
+                        answers.extend(more);
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub async fn probe_host(host: &str, opts: &ProbeOptions) -> Result<Vec<HostAnswer>> {
     let transport = Transport::build(Mode::Listen)?;
     let qname = parse_name(host)?;

@@ -25,6 +25,18 @@ pub(crate) fn test_mode() -> Mode {
     }
 }
 
+pub(crate) const LLMNR_TEST_GROUP_V4: Ipv4Addr = Ipv4Addr::new(239, 255, 99, 98);
+pub(crate) const LLMNR_TEST_GROUP_V6: Ipv6Addr = Ipv6Addr::new(0xff12, 0, 0, 0, 0, 0, 0xab, 0xce);
+pub(crate) const LLMNR_TEST_PORT: u16 = 15356;
+
+pub(crate) fn llmnr_test_mode() -> Mode {
+    Mode::Custom {
+        group_v4: LLMNR_TEST_GROUP_V4,
+        group_v6: LLMNR_TEST_GROUP_V6,
+        port: LLMNR_TEST_PORT,
+    }
+}
+
 pub(crate) fn fake_appletv_table() -> AnswerTable {
     let host = Name::from_utf8("FakeATV.local.").expect("name");
     AnswerTableBuilder::new()

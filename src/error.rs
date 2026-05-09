@@ -13,6 +13,9 @@ pub enum Error {
     #[error("authorization blocked op {op} for target {target}")]
     Authorization { op: &'static str, target: String },
 
+    #[error("credcap error: {reason}")]
+    Credcap { reason: String },
+
     #[error("timed out after {0:?}")]
     Timeout(std::time::Duration),
 
@@ -28,8 +31,14 @@ pub enum Error {
         timeout: std::time::Duration,
     },
 
+    #[error("name resolution protocol error: {reason}")]
+    NameRes { reason: String },
+
     #[error("spoof verify failed: {reason}")]
     SpoofVerify { reason: String },
+
+    #[error("invalid CLI usage: {reason}")]
+    Cli { reason: String },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

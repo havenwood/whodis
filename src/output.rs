@@ -149,6 +149,24 @@ pub(crate) fn emit_instance(
     }
 }
 
+pub(crate) fn emit_llmnr_answer(
+    renderer: Renderer,
+    answer: &crate::name_res::llmnr::LlmnrAnswer,
+) -> io::Result<()> {
+    match renderer {
+        Renderer::Jsonl => emit_jsonl(&serde_json::json!({
+            "kind": "llmnr_answer",
+            "name": answer.name,
+            "addr": answer.addr.to_string(),
+            "ttl": answer.ttl,
+        })),
+        Renderer::Pretty(_) => emit_raw(&format!(
+            "{} -> {} (ttl {})\n",
+            answer.name, answer.addr, answer.ttl
+        )),
+    }
+}
+
 pub(crate) fn emit_host_answers(renderer: Renderer, answers: &[HostAnswer]) -> io::Result<()> {
     match renderer {
         Renderer::Jsonl => {

@@ -80,6 +80,10 @@ pub enum Anomaly {
         name: String,
         src: String,
     },
+    NameResRaceFlood {
+        name: String,
+        sources: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -100,7 +104,8 @@ impl Anomaly {
             | Self::CacheFlushRateExceeded { .. }
             | Self::GoodbyeThenTakeover { .. }
             | Self::SourceIpMismatch { .. }
-            | Self::LlmnrPoisonResponder { .. } => "high",
+            | Self::LlmnrPoisonResponder { .. }
+            | Self::NameResRaceFlood { .. } => "high",
         }
     }
 }
@@ -113,6 +118,7 @@ struct State {
     last_goodbye: HashMap<String, (IpAddr, Instant)>,
     type_goodbye_targets: HashMap<(String, IpAddr), VecDeque<(Instant, String)>>,
     reported: HashSet<AnomalyKey>,
+    name_res_race_window: HashMap<String, VecDeque<(IpAddr, Instant)>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -126,6 +132,7 @@ enum AnomalyKey {
     SourceIpMismatch(String, RecordType, IpAddr, IpAddr),
     UnsolicitedAdditional(String, RecordType, IpAddr),
     LlmnrPoison(String, IpAddr),
+    NameResRace(String),
 }
 
 /// Pure, transport-free anomaly tracker. Public so tests and embedders can drive it directly.
@@ -144,15 +151,56 @@ impl AnomalyTracker {
         self.observe_at(msg, src, Instant::now())
     }
 
+    /// Observe an LLMNR name-resolution response (public API for library users).
     pub fn observe_llmnr_response(&mut self, name: &str, source: std::net::IpAddr) -> Vec<Anomaly> {
-        let key = AnomalyKey::LlmnrPoison(name.to_string(), source);
-        if !self.state.reported.insert(key) {
-            return Vec::new();
+        self.observe_llmnr_response_at(name, source, Instant::now())
+    }
+
+    /// Test hook: explicit clock so windowed checks are deterministic.
+    pub fn observe_llmnr_response_at(
+        &mut self,
+        name: &str,
+        source: std::net::IpAddr,
+        at: Instant,
+    ) -> Vec<Anomaly> {
+        let mut out = Vec::new();
+
+        // 1. LlmnrPoisonResponder (dedup per (name, source)).
+        let poison_key = AnomalyKey::LlmnrPoison(name.to_string(), source);
+        if self.state.reported.insert(poison_key) {
+            out.push(Anomaly::LlmnrPoisonResponder {
+                name: name.to_string(),
+                src: source.to_string(),
+            });
         }
-        vec![Anomaly::LlmnrPoisonResponder {
-            name: name.to_string(),
-            src: source.to_string(),
-        }]
+
+        // 2. Maintain rolling 1s window of (source, time) per name.
+        let entry = self
+            .state
+            .name_res_race_window
+            .entry(name.to_string())
+            .or_default();
+        let one_sec = Duration::from_secs(1);
+        entry.retain(|(_, t)| at.saturating_duration_since(*t) <= one_sec);
+        entry.push_back((source, at));
+
+        // 3. NameResRaceFlood when 3+ distinct sources are in the current window.
+        let unique_sources: std::collections::BTreeSet<IpAddr> =
+            entry.iter().map(|(s, _)| *s).collect();
+        if unique_sources.len() >= 3 {
+            let race_key = AnomalyKey::NameResRace(name.to_string());
+            if self.state.reported.insert(race_key) {
+                out.push(Anomaly::NameResRaceFlood {
+                    name: name.to_string(),
+                    sources: unique_sources
+                        .into_iter()
+                        .map(|ip| ip.to_string())
+                        .collect(),
+                });
+            }
+        }
+
+        out
     }
 
     /// Test hook: explicit clock so windowed checks are deterministic.
@@ -461,6 +509,7 @@ fn format_rdata(record: &Record) -> String {
 
 pub struct Detector {
     transport: Arc<Transport>,
+    llmnr_transport: Option<Arc<Transport>>,
     tracker: Mutex<AnomalyTracker>,
     cancel: CancellationToken,
     event_callback: Option<Arc<dyn Fn(Anomaly) + Send + Sync>>,
@@ -477,6 +526,7 @@ impl Detector {
         let transport = Arc::new(Transport::build(mode)?);
         Ok(Self {
             transport,
+            llmnr_transport: None,
             tracker: Mutex::new(AnomalyTracker::new()),
             cancel: CancellationToken::new(),
             event_callback: None,
@@ -503,6 +553,18 @@ impl Detector {
         self
     }
 
+    /// Add an LLMNR socket to the detector so it also fires LLMNR poison-responder anomalies.
+    /// Requires a `Mode` that binds a port (Listen, Authoritative, or Custom).
+    pub fn with_llmnr_mode(mut self, mode: Mode) -> Result<Self> {
+        if !mode.binds_port() {
+            return Err(Error::InvalidServiceType(format!(
+                "Detector::with_llmnr_mode requires Listen/Authoritative/Custom mode, got {mode:?}"
+            )));
+        }
+        self.llmnr_transport = Some(Arc::new(Transport::build(mode)?));
+        Ok(self)
+    }
+
     #[must_use]
     pub fn cancel_token(&self) -> CancellationToken {
         self.cancel.clone()
@@ -511,7 +573,10 @@ impl Detector {
     pub async fn run(self) -> Result<()> {
         let v4 = self.transport.v4();
         let v6 = self.transport.v6();
+        let llmnr_v4 = self.llmnr_transport.as_ref().and_then(|t| t.v4());
+        let llmnr_v6 = self.llmnr_transport.as_ref().and_then(|t| t.v6());
         let mut buf = vec![0u8; 9000];
+        let mut llmnr_buf = vec![0u8; 9000];
         loop {
             tokio::select! {
                 () = self.cancel.cancelled() => return Ok(()),
@@ -531,6 +596,21 @@ impl Detector {
                         Err(e) => tracing::debug!(error = %e, "watch rx error, continuing"),
                     }
                 }
+                r = recv_one(llmnr_v4.as_ref(), llmnr_v6.as_ref(), &mut llmnr_buf), if self.llmnr_transport.is_some() => {
+                    match r {
+                        Ok(Some((n, src))) => {
+                            if let Some(t) = self.llmnr_transport.as_ref()
+                                && !self.include_local && t.is_local_addr(src.ip())
+                            {
+                                continue;
+                            }
+                            let payload = llmnr_buf.get(..n).unwrap_or(&[]);
+                            self.dispatch_llmnr(payload, src);
+                        }
+                        Ok(None) => {}
+                        Err(e) => tracing::debug!(error = %e, "llmnr watch rx error, continuing"),
+                    }
+                }
             }
         }
     }
@@ -543,6 +623,26 @@ impl Detector {
         drop(tracker);
         if let Some(cb) = self.event_callback.as_ref() {
             for a in anomalies {
+                cb(a);
+            }
+        }
+    }
+
+    fn dispatch_llmnr(&self, bytes: &[u8], src: SocketAddr) {
+        let Ok(answers) = crate::name_res::llmnr::decode_message(bytes) else {
+            return;
+        };
+        let Ok(mut tracker) = self.tracker.lock() else {
+            return;
+        };
+        let mut all = Vec::new();
+        for ans in answers {
+            let name = ans.name.trim_end_matches('.').to_string();
+            all.extend(tracker.observe_llmnr_response(&name, src.ip()));
+        }
+        drop(tracker);
+        if let Some(cb) = self.event_callback.as_ref() {
+            for a in all {
                 cb(a);
             }
         }
@@ -1123,39 +1223,60 @@ mod tests {
     }
 
     #[test]
-    fn llmnr_poison_responder_fires_on_unknown_source() {
+    fn name_res_race_flood_fires_on_three_or_more_sources_within_one_sec() {
         let mut tracker = AnomalyTracker::new();
-        let src1: std::net::IpAddr = "10.0.0.5".parse().expect("ip");
+        let now = std::time::Instant::now();
+        let s1: std::net::IpAddr = "10.0.0.5".parse().expect("ip");
+        let s2: std::net::IpAddr = "10.0.0.6".parse().expect("ip");
+        let s3: std::net::IpAddr = "10.0.0.7".parse().expect("ip");
 
-        let anomalies = tracker.observe_llmnr_response("wpad", src1);
         assert!(
-            anomalies.iter().any(|a| matches!(
-                a,
-                Anomaly::LlmnrPoisonResponder { name, src }
-                    if name == "wpad" && src == &src1.to_string()
-            )),
-            "expected LlmnrPoisonResponder with correct name and src, got {anomalies:?}"
+            tracker
+                .observe_llmnr_response_at("wpad", s1, now)
+                .iter()
+                .all(|a| !matches!(a, Anomaly::NameResRaceFlood { .. }))
+        );
+        assert!(
+            tracker
+                .observe_llmnr_response_at("wpad", s2, now + std::time::Duration::from_millis(200))
+                .iter()
+                .all(|a| !matches!(a, Anomaly::NameResRaceFlood { .. }))
         );
 
-        // Same source for the same name does not re-fire (dedup).
-        let again = tracker.observe_llmnr_response("wpad", src1);
-        assert!(again.is_empty(), "expected dedup, got {again:?}");
+        let third = tracker.observe_llmnr_response_at(
+            "wpad",
+            s3,
+            now + std::time::Duration::from_millis(400),
+        );
+        assert!(
+            third
+                .iter()
+                .any(|a| matches!(a, Anomaly::NameResRaceFlood { name, sources } if name == "wpad" && sources.len() == 3)),
+            "expected NameResRaceFlood with 3 sources, got {third:?}"
+        );
     }
 
     #[test]
-    fn llmnr_poison_responder_fires_per_source_per_name() {
+    fn name_res_race_flood_does_not_fire_outside_window() {
         let mut tracker = AnomalyTracker::new();
-        let src1: std::net::IpAddr = "10.0.0.5".parse().expect("ip");
-        let src2: std::net::IpAddr = "10.0.0.6".parse().expect("ip");
+        let now = std::time::Instant::now();
+        let s1: std::net::IpAddr = "10.0.0.5".parse().expect("ip");
+        let s2: std::net::IpAddr = "10.0.0.6".parse().expect("ip");
+        let s3: std::net::IpAddr = "10.0.0.7".parse().expect("ip");
 
-        drop(tracker.observe_llmnr_response("wpad", src1));
-        let second = tracker.observe_llmnr_response("wpad", src2);
+        drop(tracker.observe_llmnr_response_at("wpad", s1, now));
+        drop(tracker.observe_llmnr_response_at(
+            "wpad",
+            s2,
+            now + std::time::Duration::from_secs(2),
+        ));
+        let third =
+            tracker.observe_llmnr_response_at("wpad", s3, now + std::time::Duration::from_secs(4));
         assert!(
-            second.iter().any(|a| matches!(
-                a,
-                Anomaly::LlmnrPoisonResponder { src, .. } if src == &src2.to_string()
-            )),
-            "expected LlmnrPoisonResponder with src2, got {second:?}"
+            !third
+                .iter()
+                .any(|a| matches!(a, Anomaly::NameResRaceFlood { .. })),
+            "should not fire outside 1s window: {third:?}"
         );
     }
 }

