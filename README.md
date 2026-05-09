@@ -111,6 +111,7 @@ Passive listener that flags suspicious LAN behavior without sending anything. De
 ```
 whodis watch                    # mDNS only
 whodis watch --llmnr            # mDNS + LLMNR poison detection
+whodis watch --ble              # BLE recon (presence, AirDrop, lock-state, classification)
 whodis watch --llmnr --include-local   # observe own host's traffic too
 whodis watch -t 60              # 60s window, then exit
 ```
@@ -129,6 +130,11 @@ Anomaly classes (each emits one JSONL record with `class`, `severity`, and class
 | `unsolicited_additional`     | An additional-section record's owner name isn't reachable from the answer section (catches `[[decoy]]` cache-poisoning) |
 | `llmnr_poison_responder`     | LLMNR answer for a name from a previously-unseen source |
 | `name_res_race_flood`        | 3+ distinct sources answering the same LLMNR name within a 1s window |
+| `device_presence`            | BLE peripheral arrived, or departed after 10 min silence |
+| `airdrop_everyone_mode`      | Apple Continuity AirDrop payload advertising Everyone-mode |
+| `lock_state_change`          | NearbyInfo `wake_status` high bit toggles (best-effort lock hint) |
+| `device_class_classification`| BLE peripheral classified to a non-Unknown class for the first time |
+| `unknown_continuity_type`    | Unrecognized Apple Continuity TLV type observed 5+ times |
 
 Loopback traffic is excluded by default; pass `--include-local` to dogfood `watch` against `flood` / `spoof` running on the same host.
 
@@ -246,6 +252,8 @@ whodis browse --ble
 whodis browse --ble -t 30
 whodis probe  --ble <PERIPHERAL_ID>
 whodis probe  --ble <PERIPHERAL_ID> --duration 60
+whodis watch  --ble
+whodis watch  --ble --include-known
 ```
 
 `<PERIPHERAL_ID>` comes from `browse --ble` output. macOS uses CoreBluetooth UUIDs (it never exposes hardware MACs).
