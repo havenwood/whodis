@@ -237,6 +237,23 @@ The captured hash format is `USER::DOMAIN:srv_challenge:NtProofStr:rest`, ready 
 
 `--allow-instance NAME` on `spoof --llmnr` is an allow-list of permitted query names (routed through the responder's `permits_name` check, not the mDNS instance check). `--wildcard` bypasses the allow-list entirely. The two flags are mutually exclusive. The spec keeps default behavior allow-list for engagement-safety; deny-list TOML is a follow-up plan.
 
+## BLE
+
+Passive Bluetooth LE scan with Apple Continuity decoding. macOS first via `btleplug` (CoreBluetooth).
+
+```sh
+whodis browse --ble
+whodis browse --ble -t 30
+whodis probe  --ble <PERIPHERAL_ID>
+whodis probe  --ble <PERIPHERAL_ID> --duration 60
+```
+
+`<PERIPHERAL_ID>` comes from `browse --ble` output. macOS uses CoreBluetooth UUIDs (it never exposes hardware MACs).
+
+First run prompts for Bluetooth access in System Settings > Privacy & Security > Bluetooth.
+
+Scope: `allow_ble_ids`, `allow_ble_vendors`, `known_ble_ids` (your own devices, suppressed unless `--include-known`).
+
 ## Clone
 
 Capture an instance on the LAN and emit a TOML answer table mimicking its `PTR` / `SRV` / `TXT` / `A` / `AAAA` records. Replays through `whodis spoof`; pair with `--relay` to MITM the real device.

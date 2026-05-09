@@ -37,6 +37,17 @@ pub enum Error {
     #[error("spoof verify failed: {reason}")]
     SpoofVerify { reason: String },
 
+    #[error("BLE adapter unavailable: {reason}")]
+    BleAdapter { reason: String },
+
+    #[error(
+        "BLE permission denied — grant Bluetooth access in System Settings > Privacy & Security > Bluetooth"
+    )]
+    BlePermissionDenied,
+
+    #[error("BLE scan error: {reason}")]
+    BleScan { reason: String },
+
     #[error("invalid CLI usage: {reason}")]
     Cli { reason: String },
 }

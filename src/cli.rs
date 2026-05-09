@@ -16,8 +16,9 @@ use crate::error::Result as WhResult;
 use crate::flood::{self, FloodOptions};
 use crate::mode::Mode;
 use crate::output::{
-    ColorMode, Renderer, emit_browse_event, emit_host_answers, emit_host_enumeration,
-    emit_instance, emit_neighbor_entries, emit_sweep_results,
+    ColorMode, Renderer, emit_ble_advertisement, emit_ble_device, emit_browse_event,
+    emit_host_answers, emit_host_enumeration, emit_instance, emit_neighbor_entries,
+    emit_sweep_results,
 };
 use crate::probe::{self, ProbeOptions};
 use crate::spoof::{MonitorBlockReason, MonitorEvent, ReplyMode};
@@ -96,7 +97,7 @@ pub enum Cmd {
         timeout: u64,
 
         /// Tag each instance with a vendor/product guess. mDNS-only.
-        #[arg(short = 'f', long, conflicts_with = "ssdp")]
+        #[arg(short = 'f', long, conflicts_with_all = ["ssdp", "ble"])]
         fingerprint: bool,
 
         /// Run for a 5-second window then exit. -t overrides the window.
@@ -108,26 +109,41 @@ pub enum Cmd {
             short = 'T',
             long = "type",
             value_name = "FQDN",
-            conflicts_with = "ssdp"
+            conflicts_with_all = ["ssdp", "ble"]
         )]
         service_type: Option<String>,
 
         /// Browse `SSDP` / `UPnP` (multicast 239.255.255.250:1900) instead of `mDNS`.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "ble")]
         ssdp: bool,
+
+        /// Scan for BLE advertisements (radio, not network).
+        #[arg(long, conflicts_with_all = ["ssdp", "service_type", "fingerprint"])]
+        ble: bool,
+
+        /// BLE-only: filter scan to advertisements containing this service UUID.
+        /// Repeatable.
+        #[arg(long, value_name = "UUID", requires = "ble")]
+        service_uuid: Vec<uuid::Uuid>,
+
+        /// BLE-only: include devices listed in `scope.known_ble_ids` in the output.
+        /// Default: suppress them.
+        #[arg(long, requires = "ble")]
+        include_known: bool,
     },
 
     /// Send a directed mDNS or SSDP query. Without args, lists mDNS service types on the LAN.
     Probe {
         /// mDNS service-type fqdn (e.g. `_airplay._tcp.local.`) or SSDP ST URN
         /// (e.g. `urn:schemas-upnp-org:device:MediaRenderer:1`) when `--ssdp` is set.
+        /// In BLE mode, the OS-assigned peripheral identifier (`CoreBluetooth` UUID on macOS).
         /// Omit for mDNS service-type discovery.
         service: Option<String>,
 
-        #[arg(long, conflicts_with = "ssdp")]
+        #[arg(long, conflicts_with_all = ["ssdp", "ble"])]
         instance: Option<String>,
 
-        #[arg(long, conflicts_with = "ssdp")]
+        #[arg(long, conflicts_with_all = ["ssdp", "ble"])]
         host: Option<String>,
 
         /// Timeout in seconds. Default: 3s for targeted queries, 8s for discovery (no positional arg).
@@ -135,7 +151,7 @@ pub enum Cmd {
         timeout: Option<u64>,
 
         /// Probe `SSDP` / `UPnP` instead of `mDNS`. The positional argument is the ST URN.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "ble")]
         ssdp: bool,
 
         /// SSDP M-SEARCH MX wait value (seconds). Only meaningful with --ssdp.
@@ -143,7 +159,7 @@ pub enum Cmd {
         mx: u32,
 
         /// Use LLMNR (UDP 5355) instead of mDNS for the lookup.
-        #[arg(long, conflicts_with = "ssdp")]
+        #[arg(long, conflicts_with_all = ["ssdp", "ble"])]
         llmnr: bool,
 
         /// LLMNR-only: query AAAA instead of A.
@@ -153,6 +169,15 @@ pub enum Cmd {
         /// LLMNR-only: query A only (default).
         #[arg(long, requires = "llmnr")]
         v4_only: bool,
+
+        /// Probe a single BLE peripheral by its OS-assigned identifier
+        /// (`CoreBluetooth` UUID on macOS).
+        #[arg(long, conflicts_with_all = ["ssdp", "llmnr"])]
+        ble: bool,
+
+        /// BLE-only: collection window in seconds for `probe --ble`. Default: 30.
+        #[arg(long, value_name = "SECS", requires = "ble", default_value_t = 30)]
+        duration: u64,
     },
 
     /// Enumerate every service a single host advertises. Without args, lists hosts on the LAN.
@@ -574,8 +599,19 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             once,
             service_type,
             ssdp,
+            ble,
+            service_uuid,
+            include_known,
         } => {
-            if ssdp {
+            if ble {
+                let cancel = tokio_util::sync::CancellationToken::new();
+                let cancel_for_ctrlc = cancel.clone();
+                tokio::spawn(async move {
+                    tokio::signal::ctrl_c().await.ok();
+                    cancel_for_ctrlc.cancel();
+                });
+                run_ble_browse(renderer, scope, include_known, service_uuid, cancel).await?;
+            } else if ssdp {
                 run_ssdp_browse(renderer, timeout, once).await?;
             } else {
                 run_browse(renderer, timeout, fingerprint, once, service_type).await?;
@@ -591,8 +627,21 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             llmnr,
             v6_only,
             v4_only: _,
+            ble,
+            duration,
         } => {
-            if ssdp {
+            if ble {
+                let target_str =
+                    service.context("--ble probe requires a peripheral ID positional argument")?;
+                let target = crate::ble::PeripheralId::new(target_str);
+                let cancel = tokio_util::sync::CancellationToken::new();
+                let cancel_for_ctrlc = cancel.clone();
+                tokio::spawn(async move {
+                    tokio::signal::ctrl_c().await.ok();
+                    cancel_for_ctrlc.cancel();
+                });
+                run_ble_probe(renderer, target, duration, cancel).await?;
+            } else if ssdp {
                 let st = service.context("--ssdp probe requires an ST URN positional argument")?;
                 run_ssdp_probe(renderer, &st, timeout.unwrap_or(3), mx).await?;
             } else if llmnr {
@@ -974,6 +1023,88 @@ async fn run_ssdp_probe(renderer: Renderer, st: &str, timeout: u64, mx: u32) -> 
     let devices = crate::ssdp::probe(st, &opts).await?;
     for d in devices {
         emit_ssdp_device(renderer, &d)?;
+    }
+    Ok(())
+}
+
+async fn run_ble_browse(
+    renderer: Renderer,
+    scope: Option<crate::scope::Scope>,
+    include_known: bool,
+    service_uuids: Vec<uuid::Uuid>,
+    cancel: tokio_util::sync::CancellationToken,
+) -> anyhow::Result<()> {
+    let svc_filter: std::collections::BTreeSet<uuid::Uuid> = service_uuids.into_iter().collect();
+    let allow_ids: std::collections::BTreeSet<String> = scope
+        .as_ref()
+        .map(|s| s.allow_ble_ids.iter().cloned().collect())
+        .unwrap_or_default();
+    let allow_vendors: std::collections::BTreeSet<String> = scope
+        .as_ref()
+        .map(|s| s.allow_ble_vendors.iter().cloned().collect())
+        .unwrap_or_default();
+    let known_ids: std::collections::BTreeSet<String> = if include_known {
+        std::collections::BTreeSet::new()
+    } else {
+        scope
+            .as_ref()
+            .map(|s| s.known_ble_ids.iter().cloned().collect())
+            .unwrap_or_default()
+    };
+
+    let source = crate::ble::scan::BtleplugSource::new()
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let scanner = crate::ble::scan::Scanner::new(source).on_event(move |ad| {
+        if known_ids.contains(ad.peripheral_id.as_str()) {
+            return;
+        }
+        if !svc_filter.is_empty() && !ad.service_uuids.iter().any(|u| svc_filter.contains(u)) {
+            return;
+        }
+        let id_set = !allow_ids.is_empty();
+        let vendor_set = !allow_vendors.is_empty();
+        if id_set || vendor_set {
+            let id_match = id_set && allow_ids.contains(ad.peripheral_id.as_str());
+            let vendor_match = vendor_set
+                && crate::ble::fingerprint::vendor(&ad).is_some_and(|v| allow_vendors.contains(&v));
+            if !id_match && !vendor_match {
+                return;
+            }
+        }
+        if let Err(e) = emit_ble_advertisement(renderer, &ad) {
+            tracing::error!(error = %e, "emit failed");
+        }
+    });
+    scanner
+        .run(cancel)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok(())
+}
+
+async fn run_ble_probe(
+    renderer: Renderer,
+    target: crate::ble::PeripheralId,
+    duration_secs: u64,
+    cancel: tokio_util::sync::CancellationToken,
+) -> anyhow::Result<()> {
+    let source = crate::ble::scan::BtleplugSource::new()
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let device = crate::ble::probe::probe_peripheral(
+        target.clone(),
+        Box::new(source),
+        std::time::Duration::from_secs(duration_secs),
+        cancel,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    match device {
+        Some(d) => emit_ble_device(renderer, &d)?,
+        None => {
+            tracing::warn!(target = %target, "no advertisements observed for target peripheral");
+        }
     }
     Ok(())
 }
