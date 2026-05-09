@@ -44,7 +44,6 @@ pub const fn ssdp_mode() -> Mode {
     }
 }
 
-
 /// A single SSDP-discovered device. Headers beyond the well-known set are
 /// preserved in `headers` so callers can inspect vendor-specific values.
 #[derive(Debug, Clone, Serialize)]
@@ -317,7 +316,10 @@ impl ClonedSsdpDevice {
             "location_path = {}",
             crate::name_util::toml_quote(&self.location_path)
         );
-        let server = self.server.as_deref().unwrap_or("Linux/1.0 UPnP/1.0 whodis/1.0");
+        let server = self
+            .server
+            .as_deref()
+            .unwrap_or("Linux/1.0 UPnP/1.0 whodis/1.0");
         let _r = writeln!(s, "server = {}", crate::name_util::toml_quote(server));
 
         // Use a TOML triple-quoted string for the description XML so embedded
@@ -387,19 +389,14 @@ struct LocationUrl {
 fn parse_location_url(url: &str) -> Result<LocationUrl> {
     let invalid = || Error::InvalidServiceType(format!("malformed LOCATION URL: {url}"));
     let rest = url.strip_prefix("http://").ok_or_else(invalid)?;
-    let (host_port, path) = rest
-        .split_once('/')
-        .map_or((rest, ""), |(hp, p)| (hp, p));
+    let (host_port, path) = rest.split_once('/').map_or((rest, ""), |(hp, p)| (hp, p));
     let path = if path.is_empty() {
         "/".to_string()
     } else {
         format!("/{path}")
     };
     let (host, port) = match host_port.rsplit_once(':') {
-        Some((h, p)) => (
-            h.to_string(),
-            p.parse::<u16>().map_err(|_| invalid())?,
-        ),
+        Some((h, p)) => (h.to_string(), p.parse::<u16>().map_err(|_| invalid())?),
         None => (host_port.to_string(), 80),
     };
     if host.is_empty() {
@@ -423,7 +420,9 @@ async fn http_get_body(
         .await
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "LOCATION fetch connect"))?
         .map_err(std::io::Error::other)?;
-    let req = format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nUser-Agent: whodis/1.0\r\nConnection: close\r\n\r\n");
+    let req = format!(
+        "GET {path} HTTP/1.1\r\nHost: {addr}\r\nUser-Agent: whodis/1.0\r\nConnection: close\r\n\r\n"
+    );
     stream.write_all(req.as_bytes()).await?;
 
     let mut raw: Vec<u8> = Vec::with_capacity(8 * 1024);
@@ -434,7 +433,9 @@ async fn http_get_body(
             if n == 0 {
                 return Ok::<(), std::io::Error>(());
             }
-            let take = chunk.get(..n).ok_or_else(|| std::io::Error::other("read len out of range"))?;
+            let take = chunk
+                .get(..n)
+                .ok_or_else(|| std::io::Error::other("read len out of range"))?;
             raw.extend_from_slice(take);
             if raw.len() >= max_body {
                 return Ok(());

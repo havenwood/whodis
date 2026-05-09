@@ -37,8 +37,8 @@ fn pick_free_port() -> u16 {
 async fn clone_device_captures_usn_st_server_and_description_xml() {
     let http_port = pick_free_port();
     let table = build_table(http_port);
-    let responder = SsdpResponder::new(Authorization::new(), table, Ipv4Addr::LOCALHOST, None)
-        .expect("build");
+    let responder =
+        SsdpResponder::new(Authorization::new(), table, Ipv4Addr::LOCALHOST, None).expect("build");
     let cancel = responder.cancel_token();
     let task = tokio::spawn(async move { responder.run().await });
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -50,13 +50,18 @@ async fn clone_device_captures_usn_st_server_and_description_xml() {
     .await
     .expect("clone_device");
 
-    assert_eq!(cloned.usn, "uuid:whodis-clone-test::urn:test:device:CloneMe:1");
+    assert_eq!(
+        cloned.usn,
+        "uuid:whodis-clone-test::urn:test:device:CloneMe:1"
+    );
     assert_eq!(cloned.st, "urn:test:device:CloneMe:1");
     assert_eq!(cloned.location_path, "/desc.xml");
     assert_eq!(cloned.http_port, http_port);
     assert_eq!(cloned.server.as_deref(), Some("WhodisClone/1.0 UPnP/1.0"));
     assert!(
-        cloned.description_xml.contains("<friendlyName>Clone Me</friendlyName>"),
+        cloned
+            .description_xml
+            .contains("<friendlyName>Clone Me</friendlyName>"),
         "got: {}",
         cloned.description_xml
     );
