@@ -629,6 +629,12 @@ fn emit_ble_anomaly_pretty(anomaly: &crate::ble::BleAnomaly) -> io::Result<()> {
         BleAnomaly::UnknownContinuityType { ty, count } => {
             format!("unknown_continuity_type={ty:#04x} count={count}\n")
         }
+        BleAnomaly::ProximityChange {
+            peripheral_id,
+            prev_rssi,
+            curr_rssi,
+            delta_dbm,
+        } => format!("{peripheral_id}  rssi={prev_rssi}->{curr_rssi} delta={delta_dbm:+}dBm\n"),
     };
     emit_raw(&line)
 }

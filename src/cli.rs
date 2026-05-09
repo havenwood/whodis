@@ -262,6 +262,12 @@ pub enum Cmd {
         /// anomaly output. Default suppresses them.
         #[arg(long = "include-known", requires = "ble")]
         include_known: bool,
+
+        /// BLE-only: emit `proximity_change` anomalies when a peripheral's
+        /// RSSI delta exceeds `DBM` between observations within a 1-minute
+        /// window. Off by default. Typical values: 15-25 dBm.
+        #[arg(long = "proximity-rssi", value_name = "DBM", requires = "ble")]
+        proximity_rssi: Option<i16>,
     },
 
     /// Capture mDNS traffic to a pcap file.
@@ -821,9 +827,17 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             llmnr,
             ble,
             include_known,
+            proximity_rssi,
         } => {
             if ble {
-                run_ble_sentinel(renderer, scope.clone(), include_known, timeout).await?;
+                run_ble_sentinel(
+                    renderer,
+                    scope.clone(),
+                    include_known,
+                    timeout,
+                    proximity_rssi,
+                )
+                .await?;
             } else {
                 run_sentinel(renderer, timeout, include_local, llmnr).await?;
             }
@@ -1387,6 +1401,7 @@ async fn run_ble_sentinel(
     scope: Option<crate::scope::Scope>,
     include_known: bool,
     timeout: u64,
+    proximity_rssi: Option<i16>,
 ) -> anyhow::Result<()> {
     let known_ids: std::collections::BTreeSet<String> = if include_known {
         std::collections::BTreeSet::new()
@@ -1401,7 +1416,11 @@ async fn run_ble_sentinel(
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    let watcher = crate::ble::watch::Watcher::new(source).on_anomaly(move |a| {
+    let mut watcher = crate::ble::watch::Watcher::new(source);
+    if let Some(threshold) = proximity_rssi {
+        watcher = watcher.with_proximity_threshold(threshold);
+    }
+    let watcher = watcher.on_anomaly(move |a| {
         if let Some(id) = ble_anomaly_peripheral_id(&a)
             && known_ids.contains(id.as_str())
         {
@@ -1440,7 +1459,8 @@ fn ble_anomaly_peripheral_id(a: &crate::ble::BleAnomaly) -> Option<&crate::ble::
         BleAnomaly::DevicePresence { peripheral_id, .. }
         | BleAnomaly::AirDropEveryoneMode { peripheral_id, .. }
         | BleAnomaly::LockStateChange { peripheral_id, .. }
-        | BleAnomaly::DeviceClassClassification { peripheral_id, .. } => Some(peripheral_id),
+        | BleAnomaly::DeviceClassClassification { peripheral_id, .. }
+        | BleAnomaly::ProximityChange { peripheral_id, .. } => Some(peripheral_id),
         BleAnomaly::UnknownContinuityType { .. } => None,
     }
 }
