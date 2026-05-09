@@ -10,7 +10,9 @@ pub mod probe;
 pub mod scan;
 pub mod service_uuids;
 pub mod types;
+pub mod watch;
 
 pub use types::{
     AddressType, AirDropMode, BleAdvertisement, BleDevice, DeviceClass, PeripheralId, RssiSample,
 };
+pub use watch::{BleAnomaly, LockState, PresenceState};
