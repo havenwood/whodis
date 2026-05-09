@@ -171,6 +171,23 @@ Supported qtypes: `A`, `AAAA`, `PTR`, `SRV`, `TXT`. `PTR` responses bundle relat
 
 The responder logs `spoof conflict` at warn level when something else on the LAN claims a name we own.
 
+## BLE
+
+Passive Bluetooth LE scan with Apple Continuity decoding. macOS first via `btleplug` (CoreBluetooth).
+
+```sh
+whodis browse --ble
+whodis browse --ble -t 30
+whodis probe  --ble <PERIPHERAL_ID>
+whodis probe  --ble <PERIPHERAL_ID> --duration 60
+```
+
+`<PERIPHERAL_ID>` comes from `browse --ble` output. macOS uses CoreBluetooth UUIDs (it never exposes hardware MACs).
+
+First run prompts for Bluetooth access in System Settings > Privacy & Security > Bluetooth.
+
+Scope: `allow_ble_ids`, `allow_ble_vendors`, `known_ble_ids` (your own devices, suppressed unless `--include-known`).
+
 ## Clone
 
 Capture an instance on the LAN and emit a TOML answer table mimicking its `PTR` / `SRV` / `TXT` / `A` / `AAAA` records. Replays through `whodis spoof`; pair with `--relay` to MITM the real device.
