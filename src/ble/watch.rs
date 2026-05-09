@@ -69,9 +69,7 @@ impl BleAnomaly {
 pub(crate) enum BleAnomalyKey {
     Presence(PeripheralId, PresenceState),
     AirDropEveryone(PeripheralId),
-    #[allow(dead_code, reason = "consumed by Task 4")]
     LockChange(PeripheralId),
-    #[allow(dead_code, reason = "consumed by Task 4")]
     Classification(PeripheralId),
     UnknownContinuityType(u8),
 }
@@ -88,14 +86,23 @@ const DEPARTED_AFTER: Duration = Duration::from_secs(600);
 /// Threshold for unknown Continuity type observations before emitting anomaly.
 const UNKNOWN_TY_THRESHOLD: usize = 5;
 
+const fn lock_state_from_wake(wake_status: u8) -> LockState {
+    // The high bit of NearbyInfo's wake_status correlates with screen-on state
+    // in observed iOS broadcasts. Best-effort heuristic, not a Bluetooth SIG
+    // specification. False positives possible during transient device states.
+    if wake_status & 0x40 != 0 {
+        LockState::Unlocked
+    } else {
+        LockState::Locked
+    }
+}
+
 #[derive(Debug, Clone)]
 struct PeripheralState {
-    #[allow(dead_code, reason = "consumed by Task 4 lock-state inference")]
+    #[allow(dead_code, reason = "consumed by Task 2 (T2) first-arrival timestamp")]
     first_seen: SystemTime,
     last_seen: SystemTime,
-    #[allow(dead_code, reason = "consumed by Task 4 lock-state inference")]
     last_wake_status: Option<u8>,
-    #[allow(dead_code, reason = "consumed by Task 3 classification tracking")]
     classification: Option<DeviceClass>,
 }
 
@@ -104,7 +111,6 @@ struct PeripheralState {
 #[derive(Debug, Default)]
 pub struct AnomalyTracker {
     peripherals: HashMap<PeripheralId, PeripheralState>,
-    #[allow(dead_code, reason = "consumed by Task 3 unknown-type tracking")]
     unknown_ty_counts: HashMap<u8, usize>,
     reported: HashSet<BleAnomalyKey>,
 }
@@ -121,6 +127,10 @@ impl AnomalyTracker {
     }
 
     /// Test hook: explicit clock so windowed checks are deterministic.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "presence + continuity decode + three dispatch branches for AirDrop/Unknown/Lock/Classification"
+    )]
     pub fn observe_at(&mut self, ad: &BleAdvertisement, now: SystemTime) -> Vec<BleAnomaly> {
         let mut out = Vec::new();
         let id = ad.peripheral_id.clone();
@@ -158,36 +168,94 @@ impl AnomalyTracker {
             });
         entry.last_seen = now;
 
-        // Continuity decode: AirDrop-Everyone and Unknown-type accounting.
-        if let Some(apple) = ad.manufacturer_data.get(&0x004C) {
-            for payload in crate::ble::continuity::decode(apple) {
-                match payload {
-                    crate::ble::continuity::ContinuityPayload::AirDropPair {
-                        mode: crate::ble::AirDropMode::Everyone,
-                        ..
-                    } => {
-                        let key = BleAnomalyKey::AirDropEveryone(ad.peripheral_id.clone());
+        // Decode Continuity payloads once — used by AirDrop / Unknown / lock branches and classification.
+        let payloads = ad
+            .manufacturer_data
+            .get(&0x004C)
+            .map(|bytes| crate::ble::continuity::decode(bytes))
+            .unwrap_or_default();
+
+        for payload in &payloads {
+            match payload {
+                crate::ble::continuity::ContinuityPayload::AirDropPair {
+                    mode: crate::ble::AirDropMode::Everyone,
+                    ..
+                } => {
+                    let key = BleAnomalyKey::AirDropEveryone(ad.peripheral_id.clone());
+                    if self.reported.insert(key) {
+                        out.push(BleAnomaly::AirDropEveryoneMode {
+                            peripheral_id: ad.peripheral_id.clone(),
+                            observed_at: now,
+                        });
+                    }
+                }
+                crate::ble::continuity::ContinuityPayload::Unknown { ty, .. } => {
+                    let count = self
+                        .unknown_ty_counts
+                        .entry(*ty)
+                        .and_modify(|c| *c += 1)
+                        .or_insert(1);
+                    if *count >= UNKNOWN_TY_THRESHOLD {
+                        let key = BleAnomalyKey::UnknownContinuityType(*ty);
                         if self.reported.insert(key) {
-                            out.push(BleAnomaly::AirDropEveryoneMode {
-                                peripheral_id: ad.peripheral_id.clone(),
-                                observed_at: now,
+                            out.push(BleAnomaly::UnknownContinuityType {
+                                ty: *ty,
+                                count: *count,
                             });
                         }
                     }
-                    crate::ble::continuity::ContinuityPayload::Unknown { ty, .. } => {
-                        let count = self
-                            .unknown_ty_counts
-                            .entry(ty)
-                            .and_modify(|c| *c += 1)
-                            .or_insert(1);
-                        if *count >= UNKNOWN_TY_THRESHOLD {
-                            let key = BleAnomalyKey::UnknownContinuityType(ty);
-                            if self.reported.insert(key) {
-                                out.push(BleAnomaly::UnknownContinuityType { ty, count: *count });
-                            }
-                        }
+                }
+                _ => {}
+            }
+        }
+
+        // Lock-state: NearbyInfo wake_status high-bit toggling.
+        for payload in &payloads {
+            if let crate::ble::continuity::ContinuityPayload::NearbyInfo { wake_status, .. } =
+                payload
+            {
+                let curr = lock_state_from_wake(*wake_status);
+                let prev = self
+                    .peripherals
+                    .get(&ad.peripheral_id)
+                    .and_then(|s| s.last_wake_status)
+                    .map(lock_state_from_wake);
+                if let Some(prev_state) = prev
+                    && prev_state != curr
+                {
+                    let key = BleAnomalyKey::LockChange(ad.peripheral_id.clone());
+                    if self.reported.insert(key) {
+                        out.push(BleAnomaly::LockStateChange {
+                            peripheral_id: ad.peripheral_id.clone(),
+                            prev: prev_state,
+                            curr,
+                        });
                     }
-                    _ => {}
+                }
+                if let Some(state) = self.peripherals.get_mut(&ad.peripheral_id) {
+                    state.last_wake_status = Some(*wake_status);
+                }
+                break;
+            }
+        }
+
+        // Classification settle: emit once when device_class becomes non-Unknown.
+        let class = crate::ble::fingerprint::device_class(ad, &payloads);
+        if class != DeviceClass::Unknown {
+            let prior = self
+                .peripherals
+                .get(&ad.peripheral_id)
+                .and_then(|s| s.classification);
+            if prior.is_none() {
+                if let Some(state) = self.peripherals.get_mut(&ad.peripheral_id) {
+                    state.classification = Some(class);
+                }
+                let key = BleAnomalyKey::Classification(ad.peripheral_id.clone());
+                if self.reported.insert(key) {
+                    out.push(BleAnomaly::DeviceClassClassification {
+                        peripheral_id: ad.peripheral_id.clone(),
+                        device_class: class,
+                    });
                 }
             }
         }
@@ -415,6 +483,124 @@ mod continuity_tests {
         assert!(
             unknown.is_some(),
             "expected UnknownContinuityType after threshold, got {fifth:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod classification_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn iphone_local_name_settles_classification_once() {
+        let ad = BleAdvertisement {
+            peripheral_id: PeripheralId::new("p1"),
+            address_type: None,
+            rssi: -50,
+            local_name: Some("Shannon's iPhone".into()),
+            manufacturer_data: BTreeMap::new(),
+            service_uuids: vec![],
+            tx_power: None,
+            timestamp: SystemTime::UNIX_EPOCH,
+        };
+        let mut t = AnomalyTracker::new();
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+        let first = t.observe_at(&ad, now);
+        assert!(
+            first.iter().any(|a| matches!(
+                a,
+                BleAnomaly::DeviceClassClassification {
+                    device_class: DeviceClass::Phone,
+                    ..
+                }
+            )),
+            "got {first:?}"
+        );
+        let second = t.observe_at(&ad, now + Duration::from_secs(1));
+        assert!(
+            !second
+                .iter()
+                .any(|a| matches!(a, BleAnomaly::DeviceClassClassification { .. })),
+            "should not re-fire classification, got {second:?}"
+        );
+    }
+
+    #[test]
+    fn unknown_class_does_not_emit_classification() {
+        let ad = BleAdvertisement {
+            peripheral_id: PeripheralId::new("p1"),
+            address_type: None,
+            rssi: -50,
+            local_name: None,
+            manufacturer_data: BTreeMap::new(),
+            service_uuids: vec![],
+            tx_power: None,
+            timestamp: SystemTime::UNIX_EPOCH,
+        };
+        let mut t = AnomalyTracker::new();
+        let out = t.observe_at(&ad, SystemTime::UNIX_EPOCH);
+        assert!(
+            !out.iter()
+                .any(|a| matches!(a, BleAnomaly::DeviceClassClassification { .. })),
+            "got {out:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod lock_state_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn nearby_info_ad(id: &str, wake_status: u8) -> BleAdvertisement {
+        // NearbyInfo type 0x10, length 0x05, status_flags=0x57, wake=wake_status, then 3 zeros
+        let mut apple = vec![0x10, 0x05, 0x57, wake_status];
+        apple.extend_from_slice(&[0u8; 3]);
+        let mut mfr = BTreeMap::new();
+        mfr.insert(0x004C, apple);
+        BleAdvertisement {
+            peripheral_id: PeripheralId::new(id),
+            address_type: None,
+            rssi: -50,
+            local_name: None,
+            manufacturer_data: mfr,
+            service_uuids: vec![],
+            tx_power: None,
+            timestamp: SystemTime::UNIX_EPOCH,
+        }
+    }
+
+    #[test]
+    fn wake_status_high_bit_change_emits_lock_state_change() {
+        let mut t = AnomalyTracker::new();
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+        drop(t.observe_at(&nearby_info_ad("p1", 0x00), now));
+        let toggled = t.observe_at(&nearby_info_ad("p1", 0x40), now + Duration::from_secs(1));
+        assert!(
+            toggled.iter().any(|a| matches!(
+                a,
+                BleAnomaly::LockStateChange {
+                    prev: LockState::Locked,
+                    curr: LockState::Unlocked,
+                    ..
+                }
+            )),
+            "got {toggled:?}"
+        );
+    }
+
+    #[test]
+    fn no_lock_change_when_wake_status_steady() {
+        let mut t = AnomalyTracker::new();
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+        drop(t.observe_at(&nearby_info_ad("p1", 0x00), now));
+        let same = t.observe_at(&nearby_info_ad("p1", 0x00), now + Duration::from_secs(1));
+        assert!(
+            !same
+                .iter()
+                .any(|a| matches!(a, BleAnomaly::LockStateChange { .. })),
+            "got {same:?}"
         );
     }
 }
