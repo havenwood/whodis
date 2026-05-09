@@ -9,6 +9,7 @@ mod auth;
 pub mod capture;
 mod cli;
 pub mod clone;
+pub mod credcap;
 pub(crate) mod dns_sd;
 mod error;
 mod hickory_compat;

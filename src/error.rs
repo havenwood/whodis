@@ -13,6 +13,9 @@ pub enum Error {
     #[error("authorization blocked op {op} for target {target}")]
     Authorization { op: &'static str, target: String },
 
+    #[error("credcap error: {reason}")]
+    Credcap { reason: String },
+
     #[error("timed out after {0:?}")]
     Timeout(std::time::Duration),
 
