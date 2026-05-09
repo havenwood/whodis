@@ -90,38 +90,57 @@ impl From<ColorChoice> for ColorMode {
 
 #[derive(Subcommand, Debug)]
 pub enum Cmd {
-    /// Watch the LAN for mDNS announcements.
+    /// Watch the LAN for mDNS or SSDP announcements.
     Browse {
         #[arg(short = 't', long, default_value_t = 0)]
         timeout: u64,
 
-        /// Tag each instance with a vendor/product guess.
-        #[arg(short = 'f', long)]
+        /// Tag each instance with a vendor/product guess. mDNS-only.
+        #[arg(short = 'f', long, conflicts_with = "ssdp")]
         fingerprint: bool,
 
         /// Run for a 5-second window then exit. -t overrides the window.
         #[arg(long = "once", short = '1')]
         once: bool,
 
-        /// Filter events to a specific service-type fqdn (e.g. `_airplay._tcp.local.`).
-        #[arg(short = 'T', long = "type", value_name = "FQDN")]
+        /// Filter events to a specific service-type fqdn (e.g. `_airplay._tcp.local.`). mDNS-only.
+        #[arg(
+            short = 'T',
+            long = "type",
+            value_name = "FQDN",
+            conflicts_with = "ssdp"
+        )]
         service_type: Option<String>,
+
+        /// Browse `SSDP` / `UPnP` (multicast 239.255.255.250:1900) instead of `mDNS`.
+        #[arg(long)]
+        ssdp: bool,
     },
 
-    /// Send a directed mDNS query. Without args, lists service types on the LAN.
+    /// Send a directed mDNS or SSDP query. Without args, lists mDNS service types on the LAN.
     Probe {
-        /// Service type fqdn, e.g. `_airplay._tcp.local.`. Omit to discover.
+        /// mDNS service-type fqdn (e.g. `_airplay._tcp.local.`) or SSDP ST URN
+        /// (e.g. `urn:schemas-upnp-org:device:MediaRenderer:1`) when `--ssdp` is set.
+        /// Omit for mDNS service-type discovery.
         service: Option<String>,
 
-        #[arg(long)]
+        #[arg(long, conflicts_with = "ssdp")]
         instance: Option<String>,
 
-        #[arg(long)]
+        #[arg(long, conflicts_with = "ssdp")]
         host: Option<String>,
 
         /// Timeout in seconds. Default: 3s for targeted queries, 8s for discovery (no positional arg).
         #[arg(short = 't', long)]
         timeout: Option<u64>,
+
+        /// Probe `SSDP` / `UPnP` instead of `mDNS`. The positional argument is the ST URN.
+        #[arg(long)]
+        ssdp: bool,
+
+        /// SSDP M-SEARCH MX wait value (seconds). Only meaningful with --ssdp.
+        #[arg(long, default_value_t = 3, requires = "ssdp")]
+        mx: u32,
     },
 
     /// Enumerate every service a single host advertises. Without args, lists hosts on the LAN.
@@ -384,6 +403,32 @@ pub enum FloodCmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Send SSDP `NOTIFY ssdp:byebye` messages, telling `UPnP` controllers a device
+    /// is gone. Disruptive.
+    Byebye {
+        /// Full SSDP USN, e.g. `uuid:abc123::urn:schemas-upnp-org:service:WANIPConnection:1`.
+        #[arg(long)]
+        usn: String,
+
+        /// SSDP NT (notification target). For an IGD: `urn:schemas-upnp-org:service:WANIPConnection:1`.
+        #[arg(long)]
+        nt: String,
+
+        #[arg(long = "allow-instance", value_name = "UUID")]
+        allow_instance: Vec<String>,
+
+        #[arg(long, default_value_t = 50, value_parser = parse_positive_u32)]
+        rate: u32,
+
+        #[arg(long, default_value_t = 1, conflicts_with = "forever", value_parser = parse_positive_usize)]
+        count: usize,
+
+        #[arg(long)]
+        forever: bool,
+
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 fn parse_positive_u32(s: &str) -> std::result::Result<u32, String> {
@@ -448,6 +493,7 @@ fn resolve_capture_path(pcap: Option<PathBuf>, scope: Option<&crate::scope::Scop
 
 #[allow(
     clippy::too_many_lines,
+    clippy::cognitive_complexity,
     reason = "run is a dispatch table over Cmd variants; splitting adds noise"
 )]
 pub async fn run(cli: Cli) -> anyhow::Result<()> {
@@ -466,27 +512,41 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             fingerprint,
             once,
             service_type,
-        } => run_browse(renderer, timeout, fingerprint, once, service_type).await?,
+            ssdp,
+        } => {
+            if ssdp {
+                run_ssdp_browse(renderer, timeout, once).await?;
+            } else {
+                run_browse(renderer, timeout, fingerprint, once, service_type).await?;
+            }
+        }
         Cmd::Probe {
             service,
             instance,
             host,
             timeout,
+            ssdp,
+            mx,
         } => {
-            let extras: Vec<String> = scope
-                .as_ref()
-                .map(|s| s.apple_services().to_vec())
-                .unwrap_or_default();
-            run_probe(
-                renderer,
-                service,
-                instance,
-                host,
-                timeout,
-                cli.no_dns_sd,
-                extras,
-            )
-            .await?;
+            if ssdp {
+                let st = service.context("--ssdp probe requires an ST URN positional argument")?;
+                run_ssdp_probe(renderer, &st, timeout.unwrap_or(3), mx).await?;
+            } else {
+                let extras: Vec<String> = scope
+                    .as_ref()
+                    .map(|s| s.apple_services().to_vec())
+                    .unwrap_or_default();
+                run_probe(
+                    renderer,
+                    service,
+                    instance,
+                    host,
+                    timeout,
+                    cli.no_dns_sd,
+                    extras,
+                )
+                .await?;
+            }
         }
         Cmd::Spoof {
             table,
@@ -728,6 +788,134 @@ async fn run_browse(
         tracing::debug!(error = %e, "browse task ended");
     }
     Ok(())
+}
+
+async fn run_ssdp_browse(renderer: Renderer, timeout: u64, once: bool) -> anyhow::Result<()> {
+    let effective = if timeout > 0 {
+        timeout
+    } else if once {
+        5
+    } else {
+        0
+    };
+    let stream = crate::ssdp::browse(Duration::from_secs(effective))?;
+    tokio::pin!(stream);
+    let deadline = if effective > 0 {
+        Some(tokio::time::Instant::now() + Duration::from_secs(effective))
+    } else {
+        None
+    };
+    loop {
+        tokio::select! {
+            event = stream.next() => {
+                match event {
+                    Some(e) => {
+                        if let Err(err) = emit_ssdp_event(renderer, &e) {
+                            tracing::error!(error = %err, "emit failed");
+                            break;
+                        }
+                    }
+                    None => break,
+                }
+            }
+            () = sleep_until_or_pending(deadline) => break,
+            r = tokio::signal::ctrl_c() => {
+                drop(r);
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn sleep_until_or_pending(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(d) => tokio::time::sleep_until(d).await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
+async fn run_ssdp_probe(renderer: Renderer, st: &str, timeout: u64, mx: u32) -> anyhow::Result<()> {
+    let opts = crate::ssdp::SsdpProbeOptions {
+        timeout: Duration::from_secs(timeout),
+        mx,
+    };
+    let devices = crate::ssdp::probe(st, &opts).await?;
+    for d in devices {
+        emit_ssdp_device(renderer, &d)?;
+    }
+    Ok(())
+}
+
+fn emit_ssdp_event(renderer: Renderer, event: &crate::ssdp::SsdpEvent) -> std::io::Result<()> {
+    match renderer {
+        Renderer::Jsonl => crate::output::emit_jsonl(event),
+        Renderer::Pretty(color) => emit_ssdp_event_pretty(color, event),
+    }
+}
+
+fn emit_ssdp_device(renderer: Renderer, device: &crate::ssdp::SsdpDevice) -> std::io::Result<()> {
+    match renderer {
+        Renderer::Jsonl => crate::output::emit_jsonl(device),
+        Renderer::Pretty(color) => emit_ssdp_device_pretty(color, device),
+    }
+}
+
+fn emit_ssdp_event_pretty(color: ColorMode, event: &crate::ssdp::SsdpEvent) -> std::io::Result<()> {
+    let on = color.enabled();
+    let line = match event {
+        crate::ssdp::SsdpEvent::Alive { device, src } => {
+            format!(
+                "{}  {}  {}  src={}\n",
+                paint_ssdp(on, "ssdp alive  ", "\x1b[32m"),
+                device.usn,
+                device.st,
+                src
+            )
+        }
+        crate::ssdp::SsdpEvent::Byebye { usn, nt, src } => {
+            format!(
+                "{}  {}  {}  src={}\n",
+                paint_ssdp(on, "ssdp byebye ", "\x1b[33m"),
+                usn,
+                nt,
+                src
+            )
+        }
+        crate::ssdp::SsdpEvent::Reply { device, src } => {
+            format!(
+                "{}  {}  {}  src={}\n",
+                paint_ssdp(on, "ssdp reply  ", "\x1b[36m"),
+                device.usn,
+                device.st,
+                src
+            )
+        }
+    };
+    crate::output::emit_raw(&line)
+}
+
+fn emit_ssdp_device_pretty(
+    color: ColorMode,
+    device: &crate::ssdp::SsdpDevice,
+) -> std::io::Result<()> {
+    let on = color.enabled();
+    let loc = device.location.as_deref().unwrap_or("-");
+    crate::output::emit_raw(&format!(
+        "{}  {}  {}  loc={}\n",
+        paint_ssdp(on, "ssdp device", "\x1b[36m"),
+        device.usn,
+        device.st,
+        loc,
+    ))
+}
+
+fn paint_ssdp(enabled: bool, body: &str, color: &str) -> String {
+    if enabled {
+        format!("{color}{body}\x1b[0m")
+    } else {
+        body.to_string()
+    }
 }
 
 #[allow(
@@ -1109,7 +1297,8 @@ fn paint_monitor(enabled: bool, body: &str, color: &str) -> String {
 
 #[allow(
     clippy::needless_pass_by_value,
-    reason = "FloodCmd must be owned to destructure in match arms"
+    clippy::too_many_lines,
+    reason = "FloodCmd must be owned to destructure in match arms; one arm per variant is unavoidable"
 )]
 async fn run_flood(kind: FloodCmd, scope: Option<crate::scope::Scope>) -> anyhow::Result<()> {
     use std::num::NonZeroU32;
@@ -1194,6 +1383,23 @@ async fn run_flood(kind: FloodCmd, scope: Option<crate::scope::Scope>) -> anyhow
                 tracing::info!(sent, "flood complete");
             }
             return Ok(());
+        }
+        FloodCmd::Byebye {
+            usn,
+            nt,
+            allow_instance,
+            rate,
+            count,
+            forever,
+            dry_run,
+        } => {
+            let auth = build_auth(allow_instance, scope);
+            let opts = FloodOptions {
+                rate_pps: NonZeroU32::new(rate).unwrap_or(NonZeroU32::MIN),
+                count: if forever { 0 } else { count },
+                dry_run,
+            };
+            crate::ssdp::flood_byebye(&usn, &nt, &auth, opts).await?
         }
     };
     if sent == 0 {
@@ -1425,9 +1631,98 @@ mod tests {
     fn cli_parses_browse_subcommand() {
         let c = Cli::try_parse_from(["whodis", "browse"]).expect("parse");
         match c.command {
-            Cmd::Browse { timeout, .. } => assert_eq!(timeout, 0),
+            Cmd::Browse { timeout, ssdp, .. } => {
+                assert_eq!(timeout, 0);
+                assert!(!ssdp);
+            }
             other => panic!("expected Browse, got {other:?}"),
         }
+    }
+
+    #[test]
+    #[allow(
+        clippy::panic,
+        reason = "test assertion intentionally panics on wrong variant"
+    )]
+    fn cli_parses_browse_with_ssdp() {
+        let c = Cli::try_parse_from(["whodis", "browse", "--ssdp"]).expect("parse");
+        match c.command {
+            Cmd::Browse { ssdp, .. } => assert!(ssdp),
+            other => panic!("expected Browse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_rejects_browse_ssdp_with_fingerprint() {
+        let err = Cli::try_parse_from(["whodis", "browse", "--ssdp", "-f"]);
+        assert!(err.is_err(), "--ssdp should conflict with --fingerprint");
+    }
+
+    #[test]
+    #[allow(
+        clippy::panic,
+        reason = "test assertion intentionally panics on wrong variant"
+    )]
+    fn cli_parses_probe_ssdp_with_urn() {
+        let c = Cli::try_parse_from([
+            "whodis",
+            "probe",
+            "urn:schemas-upnp-org:device:MediaRenderer:1",
+            "--ssdp",
+        ])
+        .expect("parse");
+        match c.command {
+            Cmd::Probe {
+                service, ssdp, mx, ..
+            } => {
+                assert_eq!(
+                    service.as_deref(),
+                    Some("urn:schemas-upnp-org:device:MediaRenderer:1")
+                );
+                assert!(ssdp);
+                assert_eq!(mx, 3);
+            }
+            other => panic!("expected Probe, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_rejects_probe_mx_without_ssdp() {
+        let err = Cli::try_parse_from(["whodis", "probe", "_airplay._tcp.local.", "--mx", "5"]);
+        assert!(err.is_err(), "--mx should require --ssdp");
+    }
+
+    #[test]
+    #[allow(
+        clippy::panic,
+        reason = "test assertion intentionally panics on wrong variant"
+    )]
+    fn cli_parses_flood_byebye() {
+        let c = Cli::try_parse_from([
+            "whodis",
+            "flood",
+            "byebye",
+            "--usn",
+            "uuid:abc::urn:schemas-upnp-org:service:WANIPConnection:1",
+            "--nt",
+            "urn:schemas-upnp-org:service:WANIPConnection:1",
+        ])
+        .expect("parse");
+        match c.command {
+            Cmd::Flood {
+                kind: FloodCmd::Byebye { usn, nt, .. },
+            } => {
+                assert!(usn.starts_with("uuid:abc::"));
+                assert_eq!(nt, "urn:schemas-upnp-org:service:WANIPConnection:1");
+            }
+            other => panic!("expected Flood::Byebye, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_requires_byebye_usn_and_nt() {
+        let err = Cli::try_parse_from(["whodis", "flood", "byebye"]);
+        assert!(err.is_err(), "byebye requires --usn and --nt");
     }
 
     #[test]
