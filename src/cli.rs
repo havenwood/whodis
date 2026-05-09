@@ -222,6 +222,10 @@ pub enum Cmd {
         /// dogfood `watch` against your own `flood`/`spoof` running on the same host.
         #[arg(long = "include-local")]
         include_local: bool,
+
+        /// Also listen on LLMNR (UDP 5355) for poison-responder anomalies.
+        #[arg(long)]
+        llmnr: bool,
     },
 
     /// Capture mDNS traffic to a pcap file.
@@ -700,7 +704,8 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         Cmd::Watch {
             timeout,
             include_local,
-        } => run_watch(renderer, timeout, include_local).await?,
+            llmnr,
+        } => run_watch(renderer, timeout, include_local, llmnr).await?,
         Cmd::Capture { pcap, timeout } => {
             let pcap = resolve_capture_path(pcap, scope.as_ref());
             let count = crate::capture::run(&pcap, timeout).await?;
@@ -1143,14 +1148,22 @@ async fn run_spoof(
     Ok(())
 }
 
-async fn run_watch(renderer: Renderer, timeout: u64, include_local: bool) -> anyhow::Result<()> {
-    let detector = crate::detect::Detector::new(Mode::Listen)?
+async fn run_watch(
+    renderer: Renderer,
+    timeout: u64,
+    include_local: bool,
+    llmnr: bool,
+) -> anyhow::Result<()> {
+    let mut detector = crate::detect::Detector::new(Mode::Listen)?
         .with_include_local(include_local)
         .with_event_callback(move |a| {
             if let Err(e) = emit_anomaly(renderer, &a) {
                 tracing::error!(error = %e, "emit failed");
             }
         });
+    if llmnr {
+        detector = detector.with_llmnr_mode(crate::name_res::llmnr::llmnr_mode())?;
+    }
     let cancel = detector.cancel_token();
     let task = tokio::spawn(async move { detector.run().await });
     if timeout > 0 {
@@ -2069,6 +2082,7 @@ mod tests {
             Cmd::Watch {
                 timeout,
                 include_local,
+                ..
             } => {
                 assert_eq!(timeout, 5);
                 assert!(include_local);
@@ -2088,6 +2102,7 @@ mod tests {
             Cmd::Watch {
                 timeout,
                 include_local,
+                ..
             } => {
                 assert_eq!(timeout, 0);
                 assert!(!include_local);

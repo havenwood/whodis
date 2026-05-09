@@ -509,6 +509,7 @@ fn format_rdata(record: &Record) -> String {
 
 pub struct Detector {
     transport: Arc<Transport>,
+    llmnr_transport: Option<Arc<Transport>>,
     tracker: Mutex<AnomalyTracker>,
     cancel: CancellationToken,
     event_callback: Option<Arc<dyn Fn(Anomaly) + Send + Sync>>,
@@ -525,6 +526,7 @@ impl Detector {
         let transport = Arc::new(Transport::build(mode)?);
         Ok(Self {
             transport,
+            llmnr_transport: None,
             tracker: Mutex::new(AnomalyTracker::new()),
             cancel: CancellationToken::new(),
             event_callback: None,
@@ -551,6 +553,18 @@ impl Detector {
         self
     }
 
+    /// Add an LLMNR socket to the detector so it also fires LLMNR poison-responder anomalies.
+    /// Requires a `Mode` that binds a port (Listen, Authoritative, or Custom).
+    pub fn with_llmnr_mode(mut self, mode: Mode) -> Result<Self> {
+        if !mode.binds_port() {
+            return Err(Error::InvalidServiceType(format!(
+                "Detector::with_llmnr_mode requires Listen/Authoritative/Custom mode, got {mode:?}"
+            )));
+        }
+        self.llmnr_transport = Some(Arc::new(Transport::build(mode)?));
+        Ok(self)
+    }
+
     #[must_use]
     pub fn cancel_token(&self) -> CancellationToken {
         self.cancel.clone()
@@ -559,7 +573,10 @@ impl Detector {
     pub async fn run(self) -> Result<()> {
         let v4 = self.transport.v4();
         let v6 = self.transport.v6();
+        let llmnr_v4 = self.llmnr_transport.as_ref().and_then(|t| t.v4());
+        let llmnr_v6 = self.llmnr_transport.as_ref().and_then(|t| t.v6());
         let mut buf = vec![0u8; 9000];
+        let mut llmnr_buf = vec![0u8; 9000];
         loop {
             tokio::select! {
                 () = self.cancel.cancelled() => return Ok(()),
@@ -579,6 +596,21 @@ impl Detector {
                         Err(e) => tracing::debug!(error = %e, "watch rx error, continuing"),
                     }
                 }
+                r = recv_one(llmnr_v4.as_ref(), llmnr_v6.as_ref(), &mut llmnr_buf), if self.llmnr_transport.is_some() => {
+                    match r {
+                        Ok(Some((n, src))) => {
+                            if let Some(t) = self.llmnr_transport.as_ref()
+                                && !self.include_local && t.is_local_addr(src.ip())
+                            {
+                                continue;
+                            }
+                            let payload = llmnr_buf.get(..n).unwrap_or(&[]);
+                            self.dispatch_llmnr(payload, src);
+                        }
+                        Ok(None) => {}
+                        Err(e) => tracing::debug!(error = %e, "llmnr watch rx error, continuing"),
+                    }
+                }
             }
         }
     }
@@ -591,6 +623,26 @@ impl Detector {
         drop(tracker);
         if let Some(cb) = self.event_callback.as_ref() {
             for a in anomalies {
+                cb(a);
+            }
+        }
+    }
+
+    fn dispatch_llmnr(&self, bytes: &[u8], src: SocketAddr) {
+        let Ok(answers) = crate::name_res::llmnr::decode_message(bytes) else {
+            return;
+        };
+        let Ok(mut tracker) = self.tracker.lock() else {
+            return;
+        };
+        let mut all = Vec::new();
+        for ans in answers {
+            let name = ans.name.trim_end_matches('.').to_string();
+            all.extend(tracker.observe_llmnr_response(&name, src.ip()));
+        }
+        drop(tracker);
+        if let Some(cb) = self.event_callback.as_ref() {
+            for a in all {
                 cb(a);
             }
         }
