@@ -1,6 +1,6 @@
 # whodis
 
-mDNS / Bonjour recon and spoof, in Rust. macOS first.
+LAN recon and spoof, in Rust. macOS first. Covers mDNS / Bonjour, SSDP / UPnP, and LLMNR, with passive anomaly detection (`watch`) and Net-NTLMv2 credential capture (`spoof --llmnr --preset wpad`).
 
 ```
 whodis browse --fingerprint
@@ -28,8 +28,9 @@ cargo install --path .
 | `enum`    | Per-host service deep dive, or host list with no args |
 | `arp`     | Read ARP/NDP caches with OUI vendor lookup |
 | `sweep`   | Active ICMP host discovery, no root required |
+| `watch`   | Passive listener for spoof / poison anomalies (mDNS, optionally LLMNR) |
 | `capture` | Dump mDNS to a pcap file |
-| `spoof`   | Authoritative responder, optionally with a TCP relay |
+| `spoof`   | Authoritative responder for mDNS, SSDP, or LLMNR; optional TCP relay or NTLMSSP credcap |
 | `clone`   | Capture a real instance to a TOML answer table |
 | `flood`   | Goodbye and conflict-rename floods |
 | `report`  | Markdown engagement report |
@@ -103,6 +104,34 @@ With no CIDR, sweeps the /24 of the primary non-loopback IPv4 interface (or the 
 
 Default `--max 256` guards against file descriptor exhaustion (macOS default `ulimit -n` is 256). IPv4 only in v1. Output is one record per host (`ip`, `alive`, `rtt_ms`, `mac`, `vendor`, `interface`); dead hosts omitted unless `--show-dead`. `--scope FILE` applies `allow_subnet` to skip IPs outside the engagement range.
 
+## Watch
+
+Passive listener that flags suspicious LAN behavior without sending anything. Default scope is mDNS; `--llmnr` adds an LLMNR socket so the same process catches Windows-side poisoning too.
+
+```
+whodis watch                    # mDNS only
+whodis watch --llmnr            # mDNS + LLMNR poison detection
+whodis watch --llmnr --include-local   # observe own host's traffic too
+whodis watch -t 60              # 60s window, then exit
+```
+
+Anomaly classes (each emits one JSONL record with `class`, `severity`, and class-specific fields):
+
+| Class | Trigger |
+|---|---|
+| `multi_source_unique_rr`     | Two distinct sources both setting cache-flush on the same A/AAAA name with different rdata |
+| `whodis_conflict_signature`  | SRV target contains `whodis-conflict` |
+| `cache_flush_rate_exceeded`  | >1 cache-flush response per 1s window per `(name, type, src)` (RFC 6762 §8.3) |
+| `goodbye_storm`              | >5 TTL=0 records from one source for one name in 2s |
+| `goodbye_then_takeover`      | TTL=0 from src A then non-zero announce from src B for the same name within 5s |
+| `service_type_goodbye_burst` | >5 distinct PTR targets goodbyed under one service-type owner from one source in 5s |
+| `source_ip_mismatch`         | A/AAAA record advertises an IP unequal to the packet's source IP, with no other record self-asserting it |
+| `unsolicited_additional`     | An additional-section record's owner name isn't reachable from the answer section (catches `[[decoy]]` cache-poisoning) |
+| `llmnr_poison_responder`     | LLMNR answer for a name from a previously-unseen source |
+| `name_res_race_flood`        | 3+ distinct sources answering the same LLMNR name within a 1s window |
+
+Loopback traffic is excluded by default; pass `--include-local` to dogfood `watch` against `flood` / `spoof` running on the same host.
+
 ## Capture
 
 LINKTYPE_RAW pcap with synthesized IPv4 / UDP wrappers. Wireshark and tshark read it directly. Default runs until Ctrl-C; `-t SECS` bounds the window.
@@ -170,6 +199,43 @@ data = "10.0.5.42"
 Supported qtypes: `A`, `AAAA`, `PTR`, `SRV`, `TXT`. `PTR` responses bundle related `SRV` / `TXT` / `A` / `AAAA` as additionals so one query fully hydrates the instance.
 
 The responder logs `spoof conflict` at warn level when something else on the LAN claims a name we own.
+
+## SSDP / UPnP
+
+The `--ssdp` flag on `browse`, `probe`, and `spoof` switches the protocol to SSDP / UPnP (HTTP-over-UDP on `239.255.255.250:1900`). Browse streams `Alive` / `Byebye` / `Reply` events; probe sends a targeted M-SEARCH; spoof builds an authoritative responder from a TOML answer table with `[[device]]` entries plus an embedded HTTP/1.1 server that serves each device's description XML at the advertised LOCATION URL.
+
+```sh
+whodis browse --ssdp
+whodis probe --ssdp 'urn:schemas-upnp-org:device:MediaRenderer:1'
+whodis spoof ssdp.toml --ssdp --http-host 10.0.5.42
+whodis flood byebye 'uuid:abc::urn:schemas-upnp-org:device:MediaRenderer:1'
+```
+
+mDNS-only flags (`-T`, `-f`, `--template`, `--burst`, `--relay`, `--reply`, `--monitor`) are gated `conflicts_with = "ssdp"`; SSDP-only flags (`--mx`, `--http-host`) require `--ssdp`.
+
+## LLMNR + WPAD credcap
+
+LLMNR (UDP/5355) is the Windows-side mDNS sibling. `whodis probe --llmnr <name>` resolves a name; `whodis spoof --llmnr <table.toml>` runs an authoritative responder with the same allow-list / scope / `whodis-scope.toml` semantics as mDNS spoof. `whodis watch --llmnr` adds the `llmnr_poison_responder` and `name_res_race_flood` anomaly classes.
+
+The headline use case is credential capture. `--preset wpad` pre-builds an answer table for `wpad`, `wpadproxy`, `wpad.local` (plus `wpad.<engagement_domain>` if `--domain` or `scope.engagement_domain` is set) and brings up a WPAD listener on TCP/8080 that drives the NTLMSSP challenge-response handshake to completion and writes hashcat mode 5600 lines to a `.hashes` file:
+
+```sh
+whodis spoof --llmnr --preset wpad
+whodis spoof --llmnr --preset wpad --credcap-out /tmp/engagement.hashes
+whodis spoof --llmnr --preset wpad --domain corp.example
+whodis spoof --llmnr table.toml --allow-instance wpad           # custom table
+whodis spoof --llmnr --preset wpad --wildcard                   # bypass allow-list
+```
+
+The captured hash format is `USER::DOMAIN:srv_challenge:NtProofStr:rest`, ready for `hashcat -m 5600`. Default output filename is `credcap-{ISO8601-Z}.hashes` in the current directory (or `scope.log_dir` if set). Port 8080 is the default because `:80` needs root and conflicts with macOS sharing — production WPAD attacks expect `:80`, so re-bind under `sudo` or with a firewall redirect for real engagements.
+
+**Honest landing-rate caveats** (printed at startup when `--preset wpad` is used):
+
+- WPAD-over-LLMNR is disabled by default in Windows 10+ since the 2018 ADV170012 mitigations. Treat WPAD hits as bonus, not primary; if no captures land in 5 minutes, pivot to SMB-driven capture (UNC paths, mapped drives, GPO startup scripts). SMB credcap is a follow-up plan.
+- Captured hashes are Net-NTLMv2 for offline cracking only — they are NOT relay material. SMB signing on modern domain clients does not block capture but does block relay (which is also a follow-up plan).
+- NTLM may be disabled outright (`LmCompatibilityLevel=5`, Restrict NTLM, Kerberos-only environments). When the client refuses NTLMSSP, nothing lands regardless of WPAD reachability.
+
+`--allow-instance NAME` on `spoof --llmnr` is an allow-list of permitted query names (routed through the responder's `permits_name` check, not the mDNS instance check). `--wildcard` bypasses the allow-list entirely. The two flags are mutually exclusive. The spec keeps default behavior allow-list for engagement-safety; deny-list TOML is a follow-up plan.
 
 ## Clone
 
