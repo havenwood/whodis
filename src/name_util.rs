@@ -1,9 +1,12 @@
-//! DNS name parsing helpers.
+//! DNS name parsing helpers, plus a couple of small string utilities shared
+//! across the crate (TOML quoting for `clone` outputs).
 //!
 //! mDNS instance labels frequently contain characters that hickory's STD3 validator
 //! rejects (spaces, `@`, etc.). `Name::from_utf8` is therefore too strict for our use
 //! case. `lax_from_str` splits on `.` and feeds the labels in as raw bytes, which
 //! bypasses STD3. Trailing dot is optional.
+
+use std::fmt::Write as _;
 
 use hickory_proto::rr::Name;
 
@@ -23,6 +26,29 @@ pub(crate) fn escape_label(label: &str) -> String {
         }
         out.push(c);
     }
+    out
+}
+
+/// Quote a string for embedding in a TOML basic string literal. Escapes the
+/// special characters TOML requires (`\`, `"`, `\n`, `\t`) plus any other
+/// control characters as `\uXXXX`. Used by `clone` outputs (mDNS and SSDP)
+/// so that `to_toml` round-trips through `toml::from_str`.
+pub(crate) fn toml_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                let _r = write!(out, "\\u{:04X}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
     out
 }
 
@@ -125,5 +151,24 @@ mod tests {
     #[test]
     fn lax_from_str_rejects_only_dots() {
         assert!(lax_from_str("....").is_err());
+    }
+
+    #[test]
+    fn toml_quote_escapes_special_chars() {
+        assert_eq!(toml_quote("plain"), r#""plain""#);
+        assert_eq!(toml_quote("with\"quote"), r#""with\"quote""#);
+        assert_eq!(toml_quote("back\\slash"), r#""back\\slash""#);
+    }
+
+    #[test]
+    fn toml_quote_escapes_control_characters() {
+        let s = toml_quote("\x01");
+        assert_eq!(s, "\"\\u0001\"");
+    }
+
+    #[test]
+    fn toml_quote_escapes_newline_and_tab() {
+        assert_eq!(toml_quote("a\nb"), "\"a\\nb\"");
+        assert_eq!(toml_quote("a\tb"), "\"a\\tb\"");
     }
 }
