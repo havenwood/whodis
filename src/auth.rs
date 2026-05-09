@@ -11,6 +11,7 @@ use ipnet::IpNet;
 pub struct Authorization {
     allow_subnets: Vec<IpNet>,
     allow_instances: Vec<String>,
+    allow_names: Vec<String>,
     warned: Arc<AtomicBool>,
 }
 
@@ -50,8 +51,25 @@ impl Authorization {
     }
 
     #[must_use]
+    pub fn allow_name(mut self, name: impl Into<String>) -> Self {
+        self.allow_names.push(name.into().to_ascii_lowercase());
+        self
+    }
+
+    #[must_use]
+    pub fn permits_name(&self, name: &str) -> bool {
+        if self.allow_names.is_empty() {
+            return true;
+        }
+        let q = name.trim_end_matches('.').to_ascii_lowercase();
+        self.allow_names.iter().any(|pat| name_matches(pat, &q))
+    }
+
+    #[must_use]
     pub fn is_permissive(&self) -> bool {
-        self.allow_subnets.is_empty() && self.allow_instances.is_empty()
+        self.allow_subnets.is_empty()
+            && self.allow_instances.is_empty()
+            && self.allow_names.is_empty()
     }
 
     /// Emit the "no allow-list" warning at most once per Authorization instance,
@@ -88,6 +106,13 @@ fn instance_candidates(name: &str) -> Vec<String> {
     candidates
 }
 
+fn name_matches(pattern: &str, query: &str) -> bool {
+    if let Some(prefix) = pattern.strip_suffix('*') {
+        return query.starts_with(prefix);
+    }
+    query == pattern
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -122,5 +147,29 @@ mod tests {
         let a = Authorization::new().allow_instance("Living._airplay._tcp.local.");
         assert!(a.permits_instance("Living._airplay._tcp.local."));
         assert!(!a.permits_instance("Living._raop._tcp.local."));
+    }
+
+    #[test]
+    fn empty_authorization_permits_any_name() {
+        let a = Authorization::new();
+        assert!(a.permits_name("wpad"));
+        assert!(a.permits_name("anything"));
+    }
+
+    #[test]
+    fn name_allow_list_blocks_outside_names() {
+        let a = Authorization::new().allow_name("wpad");
+        assert!(a.permits_name("wpad"));
+        assert!(a.permits_name("WPAD"));
+        assert!(a.permits_name("wpad."));
+        assert!(!a.permits_name("printserver"));
+    }
+
+    #[test]
+    fn name_glob_matches_trailing_star() {
+        let a = Authorization::new().allow_name("proxy*");
+        assert!(a.permits_name("proxy"));
+        assert!(a.permits_name("proxyserver"));
+        assert!(!a.permits_name("notproxy"));
     }
 }

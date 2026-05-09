@@ -30,6 +30,10 @@ pub struct Scope {
     pub log_dir: Option<PathBuf>,
     #[serde(default)]
     pub apple_services: Vec<String>,
+    #[serde(default)]
+    pub allow_llmnr_names: Vec<String>,
+    #[serde(default)]
+    pub engagement_domain: Option<String>,
 }
 
 impl Scope {
@@ -54,6 +58,9 @@ impl Scope {
         }
         for name in self.allow_instance {
             auth = auth.allow_instance(name);
+        }
+        for name in self.allow_llmnr_names {
+            auth = auth.allow_name(name);
         }
         for net in extra_subnets {
             auth = auth.allow_subnet(net);
@@ -108,6 +115,8 @@ mod tests {
             allow_instance: vec!["Foo".into()],
             log_dir: None,
             apple_services: Vec::new(),
+            allow_llmnr_names: Vec::new(),
+            engagement_domain: None,
         };
         let auth = s.into_auth(
             vec!["192.168.1.0/24".parse().expect("net")],
@@ -194,10 +203,23 @@ mod tests {
             allow_instance: vec!["Office".into()],
             log_dir: None,
             apple_services: Vec::new(),
+            allow_llmnr_names: Vec::new(),
+            engagement_domain: None,
         };
         let auth = s.into_auth(vec![], vec![]);
         assert!(auth.permits_addr("172.16.5.1".parse().expect("addr")));
         assert!(auth.permits_instance("Office"));
         assert!(!auth.permits_instance("Unknown"));
+    }
+
+    #[test]
+    fn loads_allow_llmnr_names_and_engagement_domain() {
+        let toml = r#"
+            allow_llmnr_names = ["wpad", "proxy*"]
+            engagement_domain = "corp.example"
+        "#;
+        let s: Scope = toml::from_str(toml).expect("parse");
+        assert_eq!(s.allow_llmnr_names, vec!["wpad", "proxy*"]);
+        assert_eq!(s.engagement_domain.as_deref(), Some("corp.example"));
     }
 }
