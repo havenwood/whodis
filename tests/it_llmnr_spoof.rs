@@ -13,7 +13,7 @@ use whodis::Authorization;
 use whodis::name_res::llmnr::Responder;
 use whodis::name_res::table::AnswerTable;
 
-use crate::common::{LLMNR_TEST_GROUP_V4, llmnr_test_mode, settle};
+use crate::common::{llmnr_test_mode, settle};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn responder_answers_for_matching_name() {
@@ -44,9 +44,8 @@ async fn responder_answers_for_matching_name() {
     let qname = Name::from_ascii("wpad.").expect("name");
     q.add_query(Query::query(qname, RecordType::A));
     let qbytes = q.to_bytes().expect("encode");
-    let dest: SocketAddr = format!("{LLMNR_TEST_GROUP_V4}:{port}")
-        .parse()
-        .expect("dest");
+    // Unicast to loopback: macOS-15 CI restricts multicast routing.
+    let dest: SocketAddr = format!("127.0.0.1:{port}").parse().expect("dest");
     probe.send_to(&qbytes, dest).await.expect("send");
 
     let mut buf = vec![0u8; 2048];
@@ -94,9 +93,8 @@ async fn responder_drops_query_outside_allow_list() {
     let qname = Name::from_ascii("wpad.").expect("name");
     q.add_query(Query::query(qname, RecordType::A));
     let qbytes = q.to_bytes().expect("encode");
-    let dest: SocketAddr = format!("{LLMNR_TEST_GROUP_V4}:{port}")
-        .parse()
-        .expect("dest");
+    // Unicast to loopback: macOS-15 CI restricts multicast routing.
+    let dest: SocketAddr = format!("127.0.0.1:{port}").parse().expect("dest");
     probe.send_to(&qbytes, dest).await.expect("send");
 
     let mut buf = vec![0u8; 2048];

@@ -14,7 +14,7 @@ use tokio::net::UdpSocket;
 
 use whodis::detect::{Anomaly, Detector};
 
-use crate::common::{LLMNR_TEST_GROUP_V4, llmnr_test_mode, settle, test_mode};
+use crate::common::{llmnr_test_mode, settle, test_mode};
 
 fn has_wpad_poison(captured: &Arc<Mutex<Vec<Anomaly>>>) -> bool {
     let Ok(g) = captured.lock() else {
@@ -68,7 +68,8 @@ async fn watch_llmnr_emits_poison_anomaly() {
         RData::A(A([10, 0, 0, 5].into())),
     ));
     let bytes = resp.to_bytes().expect("encode");
-    let dest = format!("{LLMNR_TEST_GROUP_V4}:{llmnr_port}");
+    // Unicast to loopback: macOS-15 CI restricts multicast routing.
+    let dest = format!("127.0.0.1:{llmnr_port}");
     sock.send_to(&bytes, &dest).await.expect("send");
 
     let deadline = std::time::Instant::now() + Duration::from_secs(2);

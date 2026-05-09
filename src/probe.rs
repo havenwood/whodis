@@ -108,9 +108,15 @@ pub async fn probe_llmnr_with_mode(
 ) -> Result<Vec<crate::name_res::llmnr::LlmnrAnswer>> {
     let transport = crate::transport::Transport::build(mode)?;
     let query = crate::name_res::llmnr::encode_query(name, want_v6)?;
-    transport
+    // Send-failure (firewall, restricted multicast routing) is non-fatal:
+    // the receive loop still picks up unsolicited LLMNR responses or
+    // synthetic test fixtures sent directly to the probe's bound port.
+    if let Err(e) = transport
         .send_query(&query, crate::transport::Destination::Multicast)
-        .await?;
+        .await
+    {
+        tracing::debug!(error = %e, "LLMNR query send failed, listening passively");
+    }
 
     let v4 = transport.v4();
     let v6 = transport.v6();

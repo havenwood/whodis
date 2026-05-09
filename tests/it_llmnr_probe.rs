@@ -10,7 +10,7 @@ use hickory_proto::serialize::binary::BinEncodable;
 use tokio::net::UdpSocket;
 use tokio_util::sync::CancellationToken;
 
-use common::{LLMNR_TEST_GROUP_V4, LLMNR_TEST_PORT, llmnr_test_mode, settle};
+use common::{LLMNR_TEST_PORT, llmnr_test_mode, settle};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn probe_llmnr_collects_response() {
@@ -47,7 +47,10 @@ async fn probe_llmnr_collects_response() {
     let bytes = resp.to_bytes().expect("encode");
 
     let sock = UdpSocket::bind("127.0.0.1:0").await.expect("bind");
-    let dest = SocketAddr::new(std::net::IpAddr::V4(LLMNR_TEST_GROUP_V4), LLMNR_TEST_PORT);
+    // Unicast to loopback rather than the multicast group: macOS-15 CI
+    // runners restrict multicast routing, and the probe's transport binds
+    // UNSPECIFIED:port so unicast still reaches it.
+    let dest = SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::LOCALHOST), LLMNR_TEST_PORT);
     sock.send_to(&bytes, dest).await.expect("send");
 
     let result = answers_handle.await.expect("join").expect("probe ok");
