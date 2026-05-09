@@ -6,6 +6,7 @@
 
 pub mod arp;
 mod auth;
+pub mod ble;
 pub mod capture;
 mod cli;
 pub mod clone;
