@@ -129,10 +129,16 @@ impl BleEventSource for BtleplugSource {
                 }
             };
             while let Some(event) = futures::StreamExt::next(&mut events).await {
-                let (CentralEvent::DeviceDiscovered(id)
-                | CentralEvent::DeviceUpdated(id)
-                | CentralEvent::ManufacturerDataAdvertisement { id, .. }
-                | CentralEvent::ServicesAdvertisement { id, .. }) = event
+                // btleplug fires DeviceDiscovered, DeviceUpdated,
+                // ManufacturerDataAdvertisement, and ServicesAdvertisement
+                // for the same advertisement, all carrying the same
+                // peripheral_id and resolving to the same properties()
+                // snapshot. Subscribe to DeviceUpdated only (which fires
+                // on every fresh ad after first sighting) plus
+                // DeviceDiscovered (first sight) to get one emission per
+                // ad without 4x duplication.
+                let (CentralEvent::DeviceDiscovered(id) | CentralEvent::DeviceUpdated(id)) =
+                    event
                 else {
                     continue;
                 };
