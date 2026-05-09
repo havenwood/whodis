@@ -141,6 +141,18 @@ pub enum Cmd {
         /// SSDP M-SEARCH MX wait value (seconds). Only meaningful with --ssdp.
         #[arg(long, default_value_t = 3, requires = "ssdp")]
         mx: u32,
+
+        /// Use LLMNR (UDP 5355) instead of mDNS for the lookup.
+        #[arg(long, conflicts_with = "ssdp")]
+        llmnr: bool,
+
+        /// LLMNR-only: query AAAA instead of A.
+        #[arg(long, requires = "llmnr", conflicts_with = "v4_only")]
+        v6_only: bool,
+
+        /// LLMNR-only: query A only (default).
+        #[arg(long, requires = "llmnr")]
+        v4_only: bool,
     },
 
     /// Enumerate every service a single host advertises. Without args, lists hosts on the LAN.
@@ -544,10 +556,27 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             timeout,
             ssdp,
             mx,
+            llmnr,
+            v6_only,
+            v4_only: _,
         } => {
             if ssdp {
                 let st = service.context("--ssdp probe requires an ST URN positional argument")?;
                 run_ssdp_probe(renderer, &st, timeout.unwrap_or(3), mx).await?;
+            } else if llmnr {
+                let name =
+                    service.context("--llmnr probe requires a hostname positional argument")?;
+                let probe_timeout = Duration::from_secs(timeout.unwrap_or(3));
+                let cancel = tokio_util::sync::CancellationToken::new();
+                let cancel_for_ctrlc = cancel.clone();
+                tokio::spawn(async move {
+                    tokio::signal::ctrl_c().await.ok();
+                    cancel_for_ctrlc.cancel();
+                });
+                let answers = probe::probe_llmnr(&name, v6_only, probe_timeout, cancel).await?;
+                for ans in &answers {
+                    crate::output::emit_llmnr_answer(renderer, ans)?;
+                }
             } else {
                 let extras: Vec<String> = scope
                     .as_ref()
