@@ -43,6 +43,8 @@ astro-dnssd = "0.3.6"
 base64 = "0.22.1"
 btleplug = "0.12"
 uuid = { version = "1.23.1", features = ["serde", "v4"] }
+async-stream = "0.3.6"
+futures = "0.3.32"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }
