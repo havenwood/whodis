@@ -34,6 +34,12 @@ pub struct Scope {
     pub allow_llmnr_names: Vec<String>,
     #[serde(default)]
     pub engagement_domain: Option<String>,
+    #[serde(default)]
+    pub allow_ble_ids: Vec<String>,
+    #[serde(default)]
+    pub allow_ble_vendors: Vec<String>,
+    #[serde(default)]
+    pub known_ble_ids: Vec<String>,
 }
 
 impl Scope {
@@ -117,6 +123,9 @@ mod tests {
             apple_services: Vec::new(),
             allow_llmnr_names: Vec::new(),
             engagement_domain: None,
+            allow_ble_ids: Vec::new(),
+            allow_ble_vendors: Vec::new(),
+            known_ble_ids: Vec::new(),
         };
         let auth = s.into_auth(
             vec!["192.168.1.0/24".parse().expect("net")],
@@ -205,6 +214,9 @@ mod tests {
             apple_services: Vec::new(),
             allow_llmnr_names: Vec::new(),
             engagement_domain: None,
+            allow_ble_ids: Vec::new(),
+            allow_ble_vendors: Vec::new(),
+            known_ble_ids: Vec::new(),
         };
         let auth = s.into_auth(vec![], vec![]);
         assert!(auth.permits_addr("172.16.5.1".parse().expect("addr")));
@@ -221,5 +233,18 @@ mod tests {
         let s: Scope = toml::from_str(toml).expect("parse");
         assert_eq!(s.allow_llmnr_names, vec!["wpad", "proxy*"]);
         assert_eq!(s.engagement_domain.as_deref(), Some("corp.example"));
+    }
+
+    #[test]
+    fn loads_ble_scope_fields() {
+        let toml = r#"
+            allow_ble_ids = ["AA-BB-CC"]
+            allow_ble_vendors = ["Apple, Inc."]
+            known_ble_ids = ["self-id"]
+        "#;
+        let s: Scope = toml::from_str(toml).expect("parse");
+        assert_eq!(s.allow_ble_ids, vec!["AA-BB-CC"]);
+        assert_eq!(s.allow_ble_vendors, vec!["Apple, Inc."]);
+        assert_eq!(s.known_ble_ids, vec!["self-id"]);
     }
 }

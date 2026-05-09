@@ -5,6 +5,7 @@ use std::io::{self, IsTerminal, Write};
 
 use serde::Serialize;
 
+use crate::ble::{BleAdvertisement, BleDevice};
 use crate::browse::Event;
 use crate::probe::{HostEnumeration, HostSummary, ServiceTypeSummary};
 use crate::types::HostAnswer;
@@ -490,6 +491,32 @@ fn emit_sweep_pretty(color: ColorMode, results: &[SweepResult]) -> io::Result<()
         )?;
     }
     Ok(())
+}
+
+#[allow(dead_code, reason = "used by Task 10 CLI dispatch")]
+pub(crate) fn emit_ble_advertisement(renderer: Renderer, ad: &BleAdvertisement) -> io::Result<()> {
+    match renderer {
+        Renderer::Jsonl => emit_jsonl(ad),
+        Renderer::Pretty(_) => {
+            let name = ad.local_name.as_deref().unwrap_or("(no name)");
+            emit_raw(&format!("{} rssi={} {}\n", ad.peripheral_id, ad.rssi, name))
+        }
+    }
+}
+
+#[allow(dead_code, reason = "used by Task 10 CLI dispatch")]
+pub(crate) fn emit_ble_device(renderer: Renderer, device: &BleDevice) -> io::Result<()> {
+    match renderer {
+        Renderer::Jsonl => emit_jsonl(device),
+        Renderer::Pretty(_) => {
+            let vendor = device.vendor.as_deref().unwrap_or("?");
+            let product = device.product.as_deref().unwrap_or("?");
+            emit_raw(&format!(
+                "{} vendor={} product={} class={:?}\n",
+                device.peripheral_id, vendor, product, device.device_class
+            ))
+        }
+    }
 }
 
 #[cfg(test)]
