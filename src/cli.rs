@@ -1250,6 +1250,15 @@ fn emit_anomaly_pretty(color: ColorMode, record: &AnomalyRecord<'_>) -> std::io:
         crate::detect::Anomaly::UnsolicitedAdditional { name, qtype, src } => {
             format!("unsolicited_additional {qtype:<5} {name}  src={src}")
         }
+        crate::detect::Anomaly::LlmnrPoisonResponder { name, src } => {
+            format!("llmnr_poison_responder -     {name}  src={src}")
+        }
+        crate::detect::Anomaly::NameResRaceFlood { name, sources } => {
+            format!(
+                "name_res_race_flood    -     {name}  sources=[{}]",
+                sources.join(",")
+            )
+        }
     };
     crate::output::emit_raw(&format!("{chip}  {detail}\n"))
 }
