@@ -6,7 +6,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::net::IpAddr;
 use std::time::{Duration, SystemTime};
 
-#[allow(unused_imports, reason = "consumed by Task 4 status state machine")]
 use crate::inventory::candidate::liveness_band;
 use crate::inventory::candidate::{
     Candidate, CandidateId, CandidateStatus, MdnsServiceRef, SsdpServiceRef,
@@ -556,6 +555,37 @@ impl IdentityGraph {
         changes
     }
 
+    /// Periodic tick: recompute status bands. Emit `StatusChanged` for any
+    /// Candidate whose band moved.
+    pub fn tick_at(&mut self, now: SystemTime) -> Vec<CandidateChange> {
+        let mut out = Vec::new();
+        let cfg = self.liveness;
+        for c in self.candidates.values_mut() {
+            let prev = c.status;
+            let next = liveness_band(
+                c.last_seen,
+                now,
+                cfg.active_after,
+                cfg.quiet_after,
+                cfg.stale_after,
+            );
+            if prev != next {
+                c.status = next;
+                out.push(CandidateChange::StatusChanged {
+                    id: c.id,
+                    from: prev,
+                    to: next,
+                });
+            }
+        }
+        out
+    }
+
+    /// Wall-clock convenience for callers that don't need a test clock.
+    pub fn tick(&mut self) -> Vec<CandidateChange> {
+        self.tick_at(SystemTime::now())
+    }
+
     /// Merge `absorbed` into `survivor`. Idempotent: merging a Candidate
     /// into itself is a no-op and returns `None`.
     fn merge_into(
@@ -899,5 +929,74 @@ mod tests {
             Some(-40),
             "RSSI should be updated"
         );
+    }
+
+    #[test]
+    fn tick_transitions_active_to_quiet_to_stale_to_gone() {
+        let mut g = IdentityGraph::new().with_liveness(LivenessConfig {
+            active_after: Duration::from_mins(1),
+            quiet_after: Duration::from_mins(5),
+            stale_after: Duration::from_mins(30),
+        });
+        drop(g.observe(Observation::Neighbor {
+            ip: ip("10.0.5.20"),
+            mac: [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+            vendor: None,
+            interface: "en0".into(),
+            observed_at: now0(),
+        }));
+
+        // Active right after observation.
+        drop(g.tick_at(now0()));
+        let c = g.candidates().next().expect("one");
+        assert_eq!(c.status, CandidateStatus::Active);
+
+        // After active_after — Quiet.
+        let changes = g.tick_at(now0() + Duration::from_mins(2));
+        assert!(
+            changes.iter().any(|c| matches!(
+                c,
+                CandidateChange::StatusChanged {
+                    to: CandidateStatus::Quiet,
+                    ..
+                }
+            )),
+            "expected Quiet transition, got {changes:?}"
+        );
+
+        // After quiet_after — Stale.
+        let changes = g.tick_at(now0() + Duration::from_mins(10));
+        assert!(changes.iter().any(|c| matches!(
+            c,
+            CandidateChange::StatusChanged {
+                to: CandidateStatus::Stale,
+                ..
+            }
+        )));
+
+        // After stale_after — Gone.
+        let changes = g.tick_at(now0() + Duration::from_hours(1));
+        assert!(changes.iter().any(|c| matches!(
+            c,
+            CandidateChange::StatusChanged {
+                to: CandidateStatus::Gone,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn tick_no_op_when_band_unchanged() {
+        let mut g = IdentityGraph::new();
+        drop(g.observe(Observation::Neighbor {
+            ip: ip("10.0.5.20"),
+            mac: [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+            vendor: None,
+            interface: "en0".into(),
+            observed_at: now0(),
+        }));
+        drop(g.tick_at(now0()));
+        let changes = g.tick_at(now0() + Duration::from_secs(1));
+        assert!(changes.is_empty(), "no transition, got {changes:?}");
     }
 }
