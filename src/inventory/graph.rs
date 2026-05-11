@@ -259,14 +259,9 @@ impl IdentityGraph {
     ) -> Vec<CandidateChange> {
         let mut changes = Vec::new();
         if !alive {
-            // Dead sweep results don't create candidates; they may update an
-            // existing candidate's last_seen if we already track it.
-            if let Some(&id) = self.by_ip.get(&ip)
-                && let Some(c) = self.candidates.get_mut(&id)
-            {
-                c.last_seen = observed_at;
-                changes.push(CandidateChange::Updated(id));
-            }
+            // Dead sweep results never refresh `last_seen` — letting them do
+            // so would keep a departed host pinned to Active forever as long
+            // as something kept probing it. They also don't create candidates.
             return changes;
         }
 
@@ -832,6 +827,31 @@ mod tests {
                 .any(|e| e.kind == LinkKind::SsdpLocationOnIp),
             "expected SsdpLocationOnIp evidence"
         );
+    }
+
+    #[test]
+    fn dead_sweep_does_not_refresh_last_seen() {
+        let mut g = IdentityGraph::new();
+        drop(g.observe(Observation::Neighbor {
+            ip: ip("10.0.5.20"),
+            mac: [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+            vendor: None,
+            interface: "en0".into(),
+            observed_at: now0(),
+        }));
+        let seen_before = g.candidates().next().expect("one").last_seen;
+        let changes = g.observe(Observation::SweepHost {
+            ip: ip("10.0.5.20"),
+            alive: false,
+            rtt_ms: None,
+            mac: None,
+            vendor: None,
+            interface: "en0".into(),
+            observed_at: now0() + Duration::from_mins(1),
+        });
+        assert!(changes.is_empty(), "dead sweep should emit no changes");
+        let seen_after = g.candidates().next().expect("one").last_seen;
+        assert_eq!(seen_before, seen_after, "last_seen must not advance");
     }
 
     #[test]
