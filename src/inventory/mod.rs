@@ -15,4 +15,4 @@ pub use candidate::{
 pub use graph::{CandidateChange, IdentityGraph, LivenessConfig};
 pub use link::{Confidence, EvidenceLink, LinkKind};
 pub use observation::Observation;
-pub use run::{RunConfig, run};
+pub use run::{RunConfig, run, run_with_graph};
