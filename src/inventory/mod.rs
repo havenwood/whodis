@@ -4,6 +4,7 @@
 pub mod candidate;
 pub mod graph;
 pub mod link;
+pub mod log;
 pub mod observation;
 
 pub use candidate::{

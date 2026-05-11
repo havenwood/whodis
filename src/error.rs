@@ -25,6 +25,9 @@ pub enum Error {
     #[error("invalid service type: {0}")]
     InvalidServiceType(String),
 
+    #[error("inventory error: {reason}")]
+    Inventory { reason: String },
+
     #[error("no records observed for {target} on the LAN within {}s", timeout.as_secs())]
     NoRecords {
         target: String,
