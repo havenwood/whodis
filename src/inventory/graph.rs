@@ -128,13 +128,22 @@ impl IdentityGraph {
             Observation::MdnsInstance {
                 fqdn,
                 service_type,
-                instance_name: _,
+                instance_name,
                 host,
                 port,
                 addrs,
                 txt,
                 observed_at,
-            } => self.observe_mdns(fqdn, service_type, host, port, addrs, txt, observed_at),
+            } => self.observe_mdns(
+                fqdn,
+                service_type,
+                instance_name,
+                host,
+                port,
+                addrs,
+                txt,
+                observed_at,
+            ),
             Observation::SsdpService {
                 usn,
                 st,
@@ -186,22 +195,31 @@ impl IdentityGraph {
         observed_at: SystemTime,
     ) -> Vec<CandidateChange> {
         let mut changes = Vec::new();
-        // Look up by MAC first (strongest); fall back to IP.
-        let target_id = if let Some(&id) = self.by_mac.get(&mac) {
-            Some(id)
-        } else {
-            self.by_ip.get(&ip).copied()
-        };
-
-        let id = if let Some(id) = target_id {
-            changes.push(CandidateChange::Updated(id));
-            id
-        } else {
-            let new_id = self.allocate_id();
-            self.candidates
-                .insert(new_id, Candidate::seed(new_id, observed_at));
-            changes.push(CandidateChange::Created(new_id));
-            new_id
+        // SameMac is the strongest binding. If we already have candidates for
+        // either the MAC or the IP, settle on the MAC-keyed one and absorb the
+        // IP-keyed one if it's distinct so we don't leave a stale duplicate
+        // behind that still claims this IP in its `ips` list.
+        let by_mac_id = self.by_mac.get(&mac).copied();
+        let by_ip_id = self.by_ip.get(&ip).copied();
+        let id = match (by_mac_id, by_ip_id) {
+            (Some(mac_id), Some(ip_id)) if mac_id != ip_id => {
+                if let Some(change) = self.merge_into(mac_id, ip_id, observed_at) {
+                    changes.push(change);
+                }
+                changes.push(CandidateChange::Updated(mac_id));
+                mac_id
+            }
+            (Some(id), _) | (None, Some(id)) => {
+                changes.push(CandidateChange::Updated(id));
+                id
+            }
+            (None, None) => {
+                let new_id = self.allocate_id();
+                self.candidates
+                    .insert(new_id, Candidate::seed(new_id, observed_at));
+                changes.push(CandidateChange::Created(new_id));
+                new_id
+            }
         };
 
         // Update Candidate fields + record evidence.
@@ -250,14 +268,9 @@ impl IdentityGraph {
     ) -> Vec<CandidateChange> {
         let mut changes = Vec::new();
         if !alive {
-            // Dead sweep results don't create candidates; they may update an
-            // existing candidate's last_seen if we already track it.
-            if let Some(&id) = self.by_ip.get(&ip)
-                && let Some(c) = self.candidates.get_mut(&id)
-            {
-                c.last_seen = observed_at;
-                changes.push(CandidateChange::Updated(id));
-            }
+            // Dead sweep results never refresh `last_seen` — letting them do
+            // so would keep a departed host pinned to Active forever as long
+            // as something kept probing it. They also don't create candidates.
             return changes;
         }
 
@@ -302,10 +315,15 @@ impl IdentityGraph {
         clippy::needless_pass_by_value,
         reason = "wraps a fixed Observation variant; Strings are Observation-owned data"
     )]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "wraps a fixed Observation variant; keeps internal signature flat"
+    )]
     fn observe_mdns(
         &mut self,
         fqdn: String,
         service_type: String,
+        instance_name: String,
         host: String,
         port: u16,
         addrs: Vec<IpAddr>,
@@ -360,6 +378,7 @@ impl IdentityGraph {
             let svc_ref = MdnsServiceRef {
                 fqdn: fqdn.clone(),
                 service_type,
+                instance_name,
                 port,
                 txt,
             };
@@ -517,7 +536,10 @@ impl IdentityGraph {
                             .any(|h| h.to_lowercase().contains(&name_lower))
                             || c.display_name
                                 .as_deref()
-                                .is_some_and(|d| d.to_lowercase().contains(&name_lower)))
+                                .is_some_and(|d| d.to_lowercase().contains(&name_lower))
+                            || c.mdns_services
+                                .iter()
+                                .any(|s| s.instance_name.to_lowercase().contains(&name_lower)))
                 })
                 .map(|(id, _)| *id)
                 .collect();
@@ -823,6 +845,124 @@ mod tests {
                 .any(|e| e.kind == LinkKind::SsdpLocationOnIp),
             "expected SsdpLocationOnIp evidence"
         );
+    }
+
+    #[test]
+    fn ble_satellite_attaches_via_mdns_instance_name_match() {
+        let mut g = IdentityGraph::new();
+        let v4 = ip("10.0.5.20");
+        drop(g.observe(Observation::Neighbor {
+            ip: v4,
+            mac: [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+            vendor: None,
+            interface: "en0".into(),
+            observed_at: now0(),
+        }));
+        // mDNS arrives — hostname is plain `iPhone.local.` but instance_name is `Shannon's iPhone`.
+        drop(g.observe(Observation::MdnsInstance {
+            fqdn: "Shannon's iPhone._companion-link._tcp.local.".into(),
+            service_type: "_companion-link._tcp.local.".into(),
+            instance_name: "Shannon's iPhone".into(),
+            host: "iPhone.local.".into(),
+            port: 49152,
+            addrs: vec![v4],
+            txt: BTreeMap::new(),
+            observed_at: now0() + Duration::from_secs(1),
+        }));
+        // BLE local_name only matches the mDNS instance_name, not the hostname.
+        drop(g.observe(Observation::BleDevice {
+            peripheral_id: crate::ble::PeripheralId::new("CB-UUID-XYZ"),
+            local_name: Some("Shannon's iPhone".into()),
+            vendor: Some("Apple".into()),
+            product: None,
+            device_class: crate::ble::DeviceClass::Phone,
+            rssi: -50,
+            service_uuids: vec![],
+            observed_at: now0() + Duration::from_secs(2),
+        }));
+        let with_sat = g
+            .candidates()
+            .find(|c| !c.mdns_services.is_empty())
+            .expect("ip-having candidate");
+        assert_eq!(
+            with_sat.ble_satellites.len(),
+            1,
+            "satellite should attach via mDNS instance_name match"
+        );
+    }
+
+    #[test]
+    fn dead_sweep_does_not_refresh_last_seen() {
+        let mut g = IdentityGraph::new();
+        drop(g.observe(Observation::Neighbor {
+            ip: ip("10.0.5.20"),
+            mac: [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+            vendor: None,
+            interface: "en0".into(),
+            observed_at: now0(),
+        }));
+        let seen_before = g.candidates().next().expect("one").last_seen;
+        let changes = g.observe(Observation::SweepHost {
+            ip: ip("10.0.5.20"),
+            alive: false,
+            rtt_ms: None,
+            mac: None,
+            vendor: None,
+            interface: "en0".into(),
+            observed_at: now0() + Duration::from_mins(1),
+        });
+        assert!(changes.is_empty(), "dead sweep should emit no changes");
+        let seen_after = g.candidates().next().expect("one").last_seen;
+        assert_eq!(seen_before, seen_after, "last_seen must not advance");
+    }
+
+    #[test]
+    fn neighbor_merges_when_mac_and_ip_point_at_different_candidates() {
+        let mut g = IdentityGraph::new();
+        // Seed candidate A by MAC alone (IPv6 link-local, no prior IPv4).
+        let mac = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
+        drop(g.observe(Observation::Neighbor {
+            ip: ip("fe80::1"),
+            mac,
+            vendor: None,
+            interface: "en0".into(),
+            observed_at: now0(),
+        }));
+        // Seed candidate B by IPv4 alone via mDNS with addrs but no MAC.
+        drop(g.observe(Observation::MdnsInstance {
+            fqdn: "Living._airplay._tcp.local.".into(),
+            service_type: "_airplay._tcp.local.".into(),
+            instance_name: "Living".into(),
+            host: "AppleTV.local.".into(),
+            port: 7000,
+            addrs: vec![ip("10.0.5.20")],
+            txt: BTreeMap::new(),
+            observed_at: now0() + Duration::from_secs(1),
+        }));
+        assert_eq!(g.len(), 2, "two distinct candidates before bridging ARP");
+        // ARP entry arrives with both: the IPv4 (Candidate B's) and the MAC
+        // (Candidate A's). Without the fix the IP would just get re-keyed
+        // onto A while B kept the IP in its `ips` list. With the fix the
+        // weaker IP-only candidate is absorbed.
+        drop(g.observe(Observation::Neighbor {
+            ip: ip("10.0.5.20"),
+            mac,
+            vendor: Some("Apple".into()),
+            interface: "en0".into(),
+            observed_at: now0() + Duration::from_secs(2),
+        }));
+        assert_eq!(
+            g.len(),
+            1,
+            "bridging ARP must merge the IP-only candidate into the MAC-keyed one"
+        );
+        let c = g.candidates().next().expect("one");
+        assert!(
+            c.ips.contains(&ip("10.0.5.20")),
+            "merged Candidate has IPv4"
+        );
+        assert!(c.ips.contains(&ip("fe80::1")), "merged Candidate has IPv6");
+        assert!(c.mdns_services.iter().any(|s| s.fqdn.starts_with("Living")));
     }
 
     #[test]

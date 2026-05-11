@@ -56,7 +56,28 @@ pub async fn run(
     cancel: CancellationToken,
     on_change: impl Fn(&CandidateChange) + Send + Sync + 'static,
 ) -> Result<Arc<Mutex<IdentityGraph>>> {
-    let graph = Arc::new(Mutex::new(IdentityGraph::new()));
+    run_with_graph(
+        cfg,
+        Arc::new(Mutex::new(IdentityGraph::new())),
+        cancel,
+        on_change,
+    )
+    .await
+}
+
+/// Variant of [`run`] that starts from a caller-supplied graph. Used by
+/// `whodis inventory --replay FILE` to carry replayed state into live mode
+/// without starting from a fresh graph.
+#[allow(
+    clippy::too_many_lines,
+    reason = "orchestrator spawns 4 observer tasks plus main multiplex loop; splitting hides the spawn order"
+)]
+pub async fn run_with_graph(
+    cfg: RunConfig,
+    graph: Arc<Mutex<IdentityGraph>>,
+    cancel: CancellationToken,
+    on_change: impl Fn(&CandidateChange) + Send + Sync + 'static,
+) -> Result<Arc<Mutex<IdentityGraph>>> {
     let cb: ChangeCallback = Arc::new(on_change);
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Observation>(1024);
 

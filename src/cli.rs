@@ -1572,15 +1572,26 @@ async fn run_inventory(
 ) -> anyhow::Result<()> {
     let cancel = tokio_util::sync::CancellationToken::new();
 
-    let mut prelude_graph = crate::inventory::IdentityGraph::new();
+    let graph = std::sync::Arc::new(std::sync::Mutex::new(crate::inventory::IdentityGraph::new()));
     if let Some(p) = replay.as_deref() {
-        let n = crate::inventory::log::replay_into(&mut prelude_graph, p)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let n = {
+            let mut locked = graph
+                .lock()
+                .map_err(|e| anyhow::anyhow!("graph poisoned: {e}"))?;
+            crate::inventory::log::replay_into(&mut locked, p)
+                .map_err(|e| anyhow::anyhow!("{e}"))?
+        };
         tracing::info!(events = n, "inventory: replay complete");
     }
 
     if replay_only {
-        for c in prelude_graph.candidates() {
+        let candidates: Vec<_> = {
+            let g = graph
+                .lock()
+                .map_err(|e| anyhow::anyhow!("graph poisoned: {e}"))?;
+            g.candidates().cloned().collect()
+        };
+        for c in &candidates {
             crate::output::emit_candidate(renderer, c)?;
         }
         return Ok(());
@@ -1609,7 +1620,7 @@ async fn run_inventory(
         });
     }
 
-    let graph = crate::inventory::run(cfg, cancel, |_change| {
+    let graph = crate::inventory::run_with_graph(cfg, graph, cancel, |_change| {
         // v1 emits a full Candidate snapshot at end-of-run rather than
         // per-change; per-change streaming is a future enhancement.
     })
