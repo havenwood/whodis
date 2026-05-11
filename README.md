@@ -104,6 +104,36 @@ With no CIDR, sweeps the /24 of the primary non-loopback IPv4 interface (or the 
 
 Default `--max 256` guards against file descriptor exhaustion (macOS default `ulimit -n` is 256). IPv4 only in v1. Output is one record per host (`ip`, `alive`, `rtt_ms`, `mac`, `vendor`, `interface`); dead hosts omitted unless `--show-dead`. `--scope FILE` applies `allow_subnet` to skip IPs outside the engagement range.
 
+## Inventory
+
+Fuse ARP mDNS SSDP and BLE observations into unified device rows. One physical device that surfaces as an ARP entry, an mDNS hostname, several Bonjour services and an SSDP USN collapses into one Candidate row backed by an explicit operator-inspectable evidence list.
+
+```
+whodis inventory                                    # run until Ctrl-C
+whodis inventory -t 60                              # 60s window then exit
+whodis inventory --log inv.jsonl                    # append every observation to a replay log
+whodis inventory --replay inv.jsonl --replay-only   # offline view of a prior run
+whodis inventory --no-ble                           # skip BLE source
+```
+
+Every Candidate row carries an explicit evidence list. Pretty output renders one line per `EvidenceLink`: `[confidence] link_kind note`. JSONL output includes the same list in the `evidence` field. Evidence disclosure is non-negotiable in v1 — every claim on a row traces back to a typed link.
+
+Merge confidence:
+
+| Link kind | Confidence | Auto-merges? |
+|---|---|---|
+| `same_mac` | very_high | yes |
+| `hostname_resolves_to_ip` | high | yes |
+| `mdns_instance_targets_host` | high | yes |
+| `ssdp_location_on_ip` | high | yes |
+| `llmnr_name_resolves_to_ip` | medium | only with another medium+ link |
+| `ble_name_matches_mdns_name` | low | no — BLE is a satellite not fused |
+| `vendor_match` | informational | no |
+
+BLE peripherals always appear as their own root Candidate plus an optional satellite on any IP-having Candidate whose hostname or display name matches the BLE `local_name`. Operators see both perspectives, never a forced collapse.
+
+Status bands: `active` (observed in last 60s), `quiet` (last 5 min), `stale` (last 30 min), `gone` (longer).
+
 ## Sentinel
 
 Passive listener that flags suspicious LAN behavior without sending anything. Default scope is mDNS; `--llmnr` adds an LLMNR socket so the same process catches Windows-side poisoning too.
