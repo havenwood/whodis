@@ -48,8 +48,9 @@ pub use ble::{
 pub use cli::{Cli, Cmd, FloodCmd, run};
 pub use error::{Error, Result};
 pub use inventory::{
-    BleSatellite, Candidate, CandidateId, CandidateStatus, Confidence, EvidenceLink, LinkKind,
-    MdnsServiceRef, Observation, SsdpServiceRef,
+    BleSatellite, Candidate, CandidateChange, CandidateId, CandidateStatus, Confidence,
+    EvidenceLink, IdentityGraph, LinkKind, LivenessConfig, MdnsServiceRef, Observation,
+    SsdpServiceRef,
 };
 pub use mode::{MDNS_GROUP_V4, MDNS_GROUP_V6, MDNS_PORT, Mode};
 pub use spoof_verify::{SpoofVerifyOptions, SpoofVerifyResult, spoof_verify};
