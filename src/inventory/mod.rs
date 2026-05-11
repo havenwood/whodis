@@ -6,6 +6,7 @@ pub mod graph;
 pub mod link;
 pub mod log;
 pub mod observation;
+pub mod run;
 
 pub use candidate::{
     BleSatellite, Candidate, CandidateId, CandidateStatus, MdnsServiceRef, SsdpServiceRef,
@@ -14,3 +15,4 @@ pub use candidate::{
 pub use graph::{CandidateChange, IdentityGraph, LivenessConfig};
 pub use link::{Confidence, EvidenceLink, LinkKind};
 pub use observation::Observation;
+pub use run::{RunConfig, run};
