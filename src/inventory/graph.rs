@@ -61,6 +61,7 @@ pub struct IdentityGraph {
     by_mac: HashMap<[u8; 6], CandidateId>,
     by_ip: HashMap<IpAddr, CandidateId>,
     by_hostname: HashMap<String, CandidateId>,
+    by_ble: HashMap<crate::ble::PeripheralId, CandidateId>,
     liveness: LivenessConfig,
 }
 
@@ -72,6 +73,7 @@ impl Default for IdentityGraph {
             by_mac: HashMap::new(),
             by_ip: HashMap::new(),
             by_hostname: HashMap::new(),
+            by_ble: HashMap::new(),
             liveness: LivenessConfig::default(),
         }
     }
@@ -143,9 +145,26 @@ impl IdentityGraph {
                 max_age: _,
                 observed_at,
             } => self.observe_ssdp(usn, st, location, server, src_ip, observed_at),
-            Observation::BleDevice { .. }
-            | Observation::MdnsGoodbye { .. }
-            | Observation::SsdpByebye { .. } => Vec::new(),
+            Observation::BleDevice {
+                peripheral_id,
+                local_name,
+                vendor,
+                product,
+                device_class,
+                rssi,
+                service_uuids,
+                observed_at,
+            } => self.observe_ble(
+                peripheral_id,
+                local_name,
+                vendor,
+                product,
+                device_class,
+                rssi,
+                service_uuids,
+                observed_at,
+            ),
+            Observation::MdnsGoodbye { .. } | Observation::SsdpByebye { .. } => Vec::new(),
         }
     }
 
@@ -423,6 +442,120 @@ impl IdentityGraph {
         changes
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::needless_pass_by_value,
+        reason = "wraps a fixed Observation variant; keeps internal signature flat"
+    )]
+    fn observe_ble(
+        &mut self,
+        peripheral_id: crate::ble::PeripheralId,
+        local_name: Option<String>,
+        vendor: Option<String>,
+        product: Option<String>,
+        device_class: crate::ble::DeviceClass,
+        rssi: i16,
+        service_uuids: Vec<uuid::Uuid>,
+        observed_at: SystemTime,
+    ) -> Vec<CandidateChange> {
+        use crate::inventory::candidate::BleSatellite;
+        let mut changes = Vec::new();
+
+        // Root: always create or update a BLE-only Candidate keyed by peripheral_id.
+        let root_id = if let Some(id) = self.by_ble.get(&peripheral_id).copied() {
+            changes.push(CandidateChange::Updated(id));
+            id
+        } else {
+            let new_id = self.allocate_id();
+            self.candidates
+                .insert(new_id, Candidate::seed(new_id, observed_at));
+            changes.push(CandidateChange::Created(new_id));
+            new_id
+        };
+
+        if let Some(c) = self.candidates.get_mut(&root_id) {
+            let satellite = BleSatellite {
+                peripheral_id: peripheral_id.clone(),
+                local_name: local_name.clone(),
+                vendor: vendor.clone(),
+                product: product.clone(),
+                device_class,
+                service_uuids: service_uuids.clone(),
+                rssi,
+                evidence: Vec::new(),
+            };
+            if let Some(existing) = c
+                .ble_satellites
+                .iter_mut()
+                .find(|s| s.peripheral_id == peripheral_id)
+            {
+                *existing = satellite;
+            } else {
+                c.ble_satellites.push(satellite);
+            }
+            if c.display_name.is_none() {
+                c.display_name.clone_from(&local_name);
+            }
+            c.last_seen = observed_at;
+        }
+        self.by_ble.insert(peripheral_id.clone(), root_id);
+
+        // Soft cross-link: attach the BLE row as a satellite on any IP-having
+        // Candidate whose hostname or display_name matches local_name
+        // (case-insensitive substring).
+        if let Some(name) = local_name.as_deref()
+            && !name.is_empty()
+        {
+            let name_lower = name.to_lowercase();
+            let matching: Vec<CandidateId> = self
+                .candidates
+                .iter()
+                .filter(|(id, c)| {
+                    **id != root_id
+                        && (c
+                            .hostnames
+                            .iter()
+                            .any(|h| h.to_lowercase().contains(&name_lower))
+                            || c.display_name
+                                .as_deref()
+                                .is_some_and(|d| d.to_lowercase().contains(&name_lower)))
+                })
+                .map(|(id, _)| *id)
+                .collect();
+            for target in matching {
+                if let Some(c) = self.candidates.get_mut(&target) {
+                    let satellite = BleSatellite {
+                        peripheral_id: peripheral_id.clone(),
+                        local_name: local_name.clone(),
+                        vendor: vendor.clone(),
+                        product: product.clone(),
+                        device_class,
+                        service_uuids: service_uuids.clone(),
+                        rssi,
+                        evidence: vec![EvidenceLink {
+                            kind: LinkKind::BleNameMatchesMdnsName,
+                            confidence: Confidence::Low,
+                            note: format!("BLE local_name {name:?} matches mDNS hostname/instance"),
+                            observed_at,
+                        }],
+                    };
+                    if let Some(existing) = c
+                        .ble_satellites
+                        .iter_mut()
+                        .find(|s| s.peripheral_id == peripheral_id)
+                    {
+                        *existing = satellite;
+                    } else {
+                        c.ble_satellites.push(satellite);
+                    }
+                    changes.push(CandidateChange::Updated(target));
+                }
+            }
+        }
+
+        changes
+    }
+
     /// Merge `absorbed` into `survivor`. Idempotent: merging a Candidate
     /// into itself is a no-op and returns `None`.
     fn merge_into(
@@ -676,5 +809,95 @@ mod tests {
         let r = g.merge_into(id, id, now0() + Duration::from_secs(1));
         assert!(r.is_none(), "self-merge should be no-op");
         assert_eq!(g.len(), 1);
+    }
+
+    #[test]
+    fn ble_always_creates_own_candidate_no_merge() {
+        let mut g = IdentityGraph::new();
+        drop(g.observe(Observation::Neighbor {
+            ip: ip("10.0.5.20"),
+            mac: [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+            vendor: None,
+            interface: "en0".into(),
+            observed_at: now0(),
+        }));
+        drop(g.observe(Observation::MdnsInstance {
+            fqdn: "Shannon's iPhone._companion-link._tcp.local.".into(),
+            service_type: "_companion-link._tcp.local.".into(),
+            instance_name: "Shannon's iPhone".into(),
+            host: "iPhone.local.".into(),
+            port: 49152,
+            addrs: vec![ip("10.0.5.20")],
+            txt: BTreeMap::default(),
+            observed_at: now0() + Duration::from_secs(1),
+        }));
+        assert_eq!(g.len(), 1, "ARP + mDNS fuse");
+
+        drop(g.observe(Observation::BleDevice {
+            peripheral_id: crate::ble::PeripheralId::new("CB-UUID-XYZ"),
+            local_name: Some("iPhone.local.".into()),
+            vendor: Some("Apple".into()),
+            product: None,
+            device_class: crate::ble::DeviceClass::Phone,
+            rssi: -50,
+            service_uuids: vec![],
+            observed_at: now0() + Duration::from_secs(2),
+        }));
+
+        // BLE must add its own root Candidate even with a name match.
+        assert_eq!(g.len(), 2, "BLE never auto-merges");
+
+        // The mDNS Candidate should now carry a BLE satellite (soft cross-link).
+        let with_sat = g
+            .candidates()
+            .find(|c| !c.mdns_services.is_empty())
+            .expect("mDNS candidate");
+        assert_eq!(
+            with_sat.ble_satellites.len(),
+            1,
+            "BLE satellite attached to mDNS candidate"
+        );
+        assert!(
+            with_sat.ble_satellites.first().is_some_and(|sat| sat
+                .evidence
+                .iter()
+                .any(|e| e.kind == LinkKind::BleNameMatchesMdnsName
+                    && e.confidence == Confidence::Low)),
+            "satellite carries low-confidence cross-link evidence"
+        );
+    }
+
+    #[test]
+    fn repeat_ble_observation_updates_rssi() {
+        let mut g = IdentityGraph::new();
+        let pid = crate::ble::PeripheralId::new("CB-UUID-XYZ");
+        drop(g.observe(Observation::BleDevice {
+            peripheral_id: pid.clone(),
+            local_name: None,
+            vendor: None,
+            product: None,
+            device_class: crate::ble::DeviceClass::Unknown,
+            rssi: -80,
+            service_uuids: vec![],
+            observed_at: now0(),
+        }));
+        drop(g.observe(Observation::BleDevice {
+            peripheral_id: pid,
+            local_name: None,
+            vendor: None,
+            product: None,
+            device_class: crate::ble::DeviceClass::Unknown,
+            rssi: -40,
+            service_uuids: vec![],
+            observed_at: now0() + Duration::from_secs(1),
+        }));
+        assert_eq!(g.len(), 1);
+        let c = g.candidates().next().expect("one");
+        assert_eq!(c.ble_satellites.len(), 1);
+        assert_eq!(
+            c.ble_satellites.first().map(|s| s.rssi),
+            Some(-40),
+            "RSSI should be updated"
+        );
     }
 }
