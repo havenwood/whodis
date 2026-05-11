@@ -128,13 +128,22 @@ impl IdentityGraph {
             Observation::MdnsInstance {
                 fqdn,
                 service_type,
-                instance_name: _,
+                instance_name,
                 host,
                 port,
                 addrs,
                 txt,
                 observed_at,
-            } => self.observe_mdns(fqdn, service_type, host, port, addrs, txt, observed_at),
+            } => self.observe_mdns(
+                fqdn,
+                service_type,
+                instance_name,
+                host,
+                port,
+                addrs,
+                txt,
+                observed_at,
+            ),
             Observation::SsdpService {
                 usn,
                 st,
@@ -306,10 +315,15 @@ impl IdentityGraph {
         clippy::needless_pass_by_value,
         reason = "wraps a fixed Observation variant; Strings are Observation-owned data"
     )]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "wraps a fixed Observation variant; keeps internal signature flat"
+    )]
     fn observe_mdns(
         &mut self,
         fqdn: String,
         service_type: String,
+        instance_name: String,
         host: String,
         port: u16,
         addrs: Vec<IpAddr>,
@@ -364,6 +378,7 @@ impl IdentityGraph {
             let svc_ref = MdnsServiceRef {
                 fqdn: fqdn.clone(),
                 service_type,
+                instance_name,
                 port,
                 txt,
             };
@@ -521,7 +536,10 @@ impl IdentityGraph {
                             .any(|h| h.to_lowercase().contains(&name_lower))
                             || c.display_name
                                 .as_deref()
-                                .is_some_and(|d| d.to_lowercase().contains(&name_lower)))
+                                .is_some_and(|d| d.to_lowercase().contains(&name_lower))
+                            || c.mdns_services
+                                .iter()
+                                .any(|s| s.instance_name.to_lowercase().contains(&name_lower)))
                 })
                 .map(|(id, _)| *id)
                 .collect();
@@ -826,6 +844,50 @@ mod tests {
                 .iter()
                 .any(|e| e.kind == LinkKind::SsdpLocationOnIp),
             "expected SsdpLocationOnIp evidence"
+        );
+    }
+
+    #[test]
+    fn ble_satellite_attaches_via_mdns_instance_name_match() {
+        let mut g = IdentityGraph::new();
+        let v4 = ip("10.0.5.20");
+        drop(g.observe(Observation::Neighbor {
+            ip: v4,
+            mac: [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+            vendor: None,
+            interface: "en0".into(),
+            observed_at: now0(),
+        }));
+        // mDNS arrives — hostname is plain `iPhone.local.` but instance_name is `Shannon's iPhone`.
+        drop(g.observe(Observation::MdnsInstance {
+            fqdn: "Shannon's iPhone._companion-link._tcp.local.".into(),
+            service_type: "_companion-link._tcp.local.".into(),
+            instance_name: "Shannon's iPhone".into(),
+            host: "iPhone.local.".into(),
+            port: 49152,
+            addrs: vec![v4],
+            txt: BTreeMap::new(),
+            observed_at: now0() + Duration::from_secs(1),
+        }));
+        // BLE local_name only matches the mDNS instance_name, not the hostname.
+        drop(g.observe(Observation::BleDevice {
+            peripheral_id: crate::ble::PeripheralId::new("CB-UUID-XYZ"),
+            local_name: Some("Shannon's iPhone".into()),
+            vendor: Some("Apple".into()),
+            product: None,
+            device_class: crate::ble::DeviceClass::Phone,
+            rssi: -50,
+            service_uuids: vec![],
+            observed_at: now0() + Duration::from_secs(2),
+        }));
+        let with_sat = g
+            .candidates()
+            .find(|c| !c.mdns_services.is_empty())
+            .expect("ip-having candidate");
+        assert_eq!(
+            with_sat.ble_satellites.len(),
+            1,
+            "satellite should attach via mDNS instance_name match"
         );
     }
 

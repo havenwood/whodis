@@ -39,6 +39,7 @@ pub enum CandidateStatus {
 pub struct MdnsServiceRef {
     pub fqdn: String,
     pub service_type: String,
+    pub instance_name: String,
     pub port: u16,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub txt: BTreeMap<String, String>,
