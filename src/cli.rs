@@ -236,6 +236,41 @@ pub enum Cmd {
         show_dead: bool,
     },
 
+    /// Fuse ARP mDNS SSDP and BLE observations into unified device rows.
+    Inventory {
+        /// Run window in seconds. 0 = until Ctrl-C.
+        #[arg(short = 't', long, default_value_t = 0)]
+        timeout: u64,
+
+        /// Append every observation to this JSONL log for replay.
+        #[arg(long, value_name = "FILE")]
+        log: Option<std::path::PathBuf>,
+
+        /// Replay observations from this JSONL file before or instead of live observation.
+        #[arg(long, value_name = "FILE")]
+        replay: Option<std::path::PathBuf>,
+
+        /// Replay-only -- do not start live observers.
+        #[arg(long, requires = "replay")]
+        replay_only: bool,
+
+        /// Skip ARP/NDP polling.
+        #[arg(long = "no-arp")]
+        no_arp: bool,
+
+        /// Skip mDNS browse.
+        #[arg(long = "no-mdns")]
+        no_mdns: bool,
+
+        /// Skip SSDP browse.
+        #[arg(long = "no-ssdp")]
+        no_ssdp: bool,
+
+        /// Skip BLE scan.
+        #[arg(long = "no-ble")]
+        no_ble: bool,
+    },
+
     /// Passive sentinel for mDNS spoofing signatures. Listen-only.
     Sentinel {
         /// Sentinel window in seconds. 0 = until Ctrl-C.
@@ -821,6 +856,29 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             }
         }
         Cmd::Flood { kind } => run_flood(kind, scope).await?,
+        Cmd::Inventory {
+            timeout,
+            log,
+            replay,
+            replay_only,
+            no_arp,
+            no_mdns,
+            no_ssdp,
+            no_ble,
+        } => {
+            run_inventory(
+                renderer,
+                timeout,
+                log,
+                replay,
+                replay_only,
+                !no_arp,
+                !no_mdns,
+                !no_ssdp,
+                !no_ble,
+            )
+            .await?;
+        }
         Cmd::Sentinel {
             timeout,
             include_local,
@@ -1490,6 +1548,83 @@ async fn run_ble_clone(
     }
 
     crate::output::emit_raw(&clone.to_toml())?;
+    Ok(())
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "wraps the CLI flag set; consolidating into a config struct hides the flag-to-call mapping"
+)]
+#[allow(
+    clippy::fn_params_excessive_bools,
+    reason = "four enable_* params mirror four independent observer sources; a struct would obscure the flag-to-call mapping"
+)]
+async fn run_inventory(
+    renderer: Renderer,
+    timeout: u64,
+    log: Option<std::path::PathBuf>,
+    replay: Option<std::path::PathBuf>,
+    replay_only: bool,
+    enable_arp: bool,
+    enable_mdns: bool,
+    enable_ssdp: bool,
+    enable_ble: bool,
+) -> anyhow::Result<()> {
+    let cancel = tokio_util::sync::CancellationToken::new();
+
+    let mut prelude_graph = crate::inventory::IdentityGraph::new();
+    if let Some(p) = replay.as_deref() {
+        let n = crate::inventory::log::replay_into(&mut prelude_graph, p)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        tracing::info!(events = n, "inventory: replay complete");
+    }
+
+    if replay_only {
+        for c in prelude_graph.candidates() {
+            crate::output::emit_candidate(renderer, c)?;
+        }
+        return Ok(());
+    }
+
+    let cfg = crate::inventory::RunConfig {
+        enable_arp,
+        enable_mdns,
+        enable_ssdp,
+        enable_ble,
+        log_path: log,
+        ..Default::default()
+    };
+
+    if timeout > 0 {
+        let cancel_for_timeout = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(timeout)).await;
+            cancel_for_timeout.cancel();
+        });
+    } else {
+        let cancel_for_signal = cancel.clone();
+        tokio::spawn(async move {
+            drop(tokio::signal::ctrl_c().await);
+            cancel_for_signal.cancel();
+        });
+    }
+
+    let graph = crate::inventory::run(cfg, cancel, |_change| {
+        // v1 emits a full Candidate snapshot at end-of-run rather than
+        // per-change; per-change streaming is a future enhancement.
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    let candidates: Vec<_> = graph
+        .lock()
+        .map_err(|e| anyhow::anyhow!("graph poisoned: {e}"))?
+        .candidates()
+        .cloned()
+        .collect();
+    for c in &candidates {
+        crate::output::emit_candidate(renderer, c)?;
+    }
     Ok(())
 }
 

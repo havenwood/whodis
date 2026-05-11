@@ -596,6 +596,96 @@ fn continuity_kind_name(p: &crate::ble::continuity::ContinuityPayload) -> &'stat
     }
 }
 
+pub(crate) fn emit_candidate(
+    renderer: Renderer,
+    candidate: &crate::inventory::Candidate,
+) -> io::Result<()> {
+    match renderer {
+        Renderer::Jsonl => emit_jsonl(candidate),
+        Renderer::Pretty(_) => emit_candidate_pretty(candidate),
+    }
+}
+
+fn emit_candidate_pretty(c: &crate::inventory::Candidate) -> io::Result<()> {
+    use crate::inventory::CandidateStatus;
+    let status = match c.status {
+        CandidateStatus::Active => "active",
+        CandidateStatus::Quiet => "quiet",
+        CandidateStatus::Stale => "stale",
+        CandidateStatus::Gone => "gone",
+    };
+    let display = c.display_name.as_deref().unwrap_or("(no name)");
+    let ips: Vec<String> = c.ips.iter().map(std::string::ToString::to_string).collect();
+    let macs: Vec<String> = c
+        .macs
+        .iter()
+        .map(|m| {
+            format!(
+                "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                m[0], m[1], m[2], m[3], m[4], m[5]
+            )
+        })
+        .collect();
+
+    let mut out = String::new();
+    let _r = writeln!(out, "candidate #{}  {status}  {display}", c.id.0);
+    if !ips.is_empty() {
+        let _r = writeln!(out, "  ips        {}", ips.join(", "));
+    }
+    if !macs.is_empty() {
+        let _r = writeln!(out, "  macs       {}", macs.join(", "));
+    }
+    if !c.hostnames.is_empty() {
+        let _r = writeln!(out, "  hostnames  {}", c.hostnames.join(", "));
+    }
+    if !c.vendors.is_empty() {
+        let _r = writeln!(out, "  vendors    {}", c.vendors.join(", "));
+    }
+    for s in &c.mdns_services {
+        let _r = writeln!(
+            out,
+            "  mdns       {} ({}:{})",
+            s.fqdn, s.service_type, s.port
+        );
+    }
+    for s in &c.ssdp_services {
+        let _r = writeln!(out, "  ssdp       {} {}", s.usn, s.st);
+    }
+    for sat in &c.ble_satellites {
+        let name = sat.local_name.as_deref().unwrap_or("(unnamed)");
+        let _r = writeln!(
+            out,
+            "  ble        {} {name} rssi={}dBm",
+            sat.peripheral_id, sat.rssi
+        );
+    }
+    if c.evidence.is_empty() {
+        let _r = writeln!(out, "  evidence   (none)");
+    } else {
+        let _r = writeln!(out, "  evidence   ({} links)", c.evidence.len());
+        for e in &c.evidence {
+            let conf = match e.confidence {
+                crate::inventory::Confidence::VeryHigh => "very_high",
+                crate::inventory::Confidence::High => "high",
+                crate::inventory::Confidence::Medium => "medium",
+                crate::inventory::Confidence::Low => "low",
+                crate::inventory::Confidence::Informational => "info",
+            };
+            let kind = match e.kind {
+                crate::inventory::LinkKind::SameMac => "same_mac",
+                crate::inventory::LinkKind::HostnameResolvesToIp => "hostname_resolves_to_ip",
+                crate::inventory::LinkKind::MdnsInstanceTargetsHost => "mdns_instance_targets_host",
+                crate::inventory::LinkKind::SsdpLocationOnIp => "ssdp_location_on_ip",
+                crate::inventory::LinkKind::LlmnrNameResolvesToIp => "llmnr_name_resolves_to_ip",
+                crate::inventory::LinkKind::BleNameMatchesMdnsName => "ble_name_matches_mdns_name",
+                crate::inventory::LinkKind::VendorMatch => "vendor_match",
+            };
+            let _r = writeln!(out, "    [{conf:<9}] {kind:<28} {}", e.note);
+        }
+    }
+    emit_raw(&out)
+}
+
 pub(crate) fn emit_ble_anomaly(
     renderer: Renderer,
     anomaly: &crate::ble::BleAnomaly,
